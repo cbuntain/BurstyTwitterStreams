@@ -18,19 +18,33 @@ object DateUtils {
     
     return cal.getTime
   }
-  
+
+  def minorWindowDates(startDate : Date, minorWindowSize : Int) : List[Date] = {
+    val cal = Calendar.getInstance
+    cal.setTime(startDate)
+
+    var l = List[Date]()
+
+    for(i <- 1 to minorWindowSize) {
+      l = l :+ cal.getTime
+      cal.add(Calendar.MINUTE, 1)
+    }
+
+    return l
+  }
+
   def constructDateList(startDate : Date, endDate : Date) : List[Date] = {
     val cal = Calendar.getInstance
     cal.setTime(startDate)
-    
+
     var l = List[Date]()
-    
+
     while(cal.getTime.before(endDate)) {
       l = l :+ cal.getTime
       cal.add(Calendar.MINUTE, 1)
     }
     l = l :+ endDate
-    
+
     return l
   }
 

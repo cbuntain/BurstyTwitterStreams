@@ -31,12 +31,20 @@ import org.json4s.jackson.JsonMethods._
 import twitter4j.Status
 import twitter4j.TwitterObjectFactory
 import edu.umd.cs.hcil.twitter.streamer.TwitterUtils
+import scala.concurrent._
+import ExecutionContext.Implicits.global
+import scala.util.{Success, Failure}
 
 object App {
   val MINOR_WINDOW_SIZE = Conf.MINOR_WINDOW_SIZE
   val MAJOR_WINDOW_SIZE = Conf.MAJOR_WINDOW_SIZE
-  val PER_MINUTE_MAX = 10
-  val THRESHOLD = 0.07
+  val PER_MINUTE_MAX = Conf.PER_MINUTE_MAX
+  val THRESHOLD = Conf.BURST_THRESHOLD
+  val SIM_THRESHOLD = Conf.SIM_THRESHOLD
+
+  val MAX_HASHTAGS = Conf.MAX_HASHTAGS
+  val MAX_URLS = Conf.MAX_URLS
+  val MIN_TOKENS = Conf.MIN_TOKENS
 
   implicit val formats = DefaultFormats // Brings in default date formats etc.
   case class Topic(title: String, num: String, tokens: List[String])
@@ -67,7 +75,7 @@ object App {
     val broad_topicKeywordSet = sc.broadcast(topicKeywordSet)
 
     // If true, we use a socket. If false, we use the direct Twitter stream
-    val replayOldStream = false
+    val replayOldStream = true
 
     // If we are going to use the direct twitter stream, use TwitterUtils. Else, use socket.
     val twitterStream = if ( replayOldStream == false ) {
@@ -79,10 +87,13 @@ object App {
       })
     }
 
-    // Remove retweets and tweets not in English
+    // Remove tweets not in English and other filters
     val noRetweetStream = twitterStream
       .filter(status => {
-      !status.isRetweet && status.getLang.compareToIgnoreCase("en") == 0 && !status.getText.toLowerCase.contains("follow")
+        status.getLang.compareToIgnoreCase("en") == 0 &&
+        !status.getText.toLowerCase.contains("follow") &&
+        status.getHashtagEntities.size <= MAX_HASHTAGS &&
+        status.getURLEntities.size <= MAX_URLS
     })
 
     // Only keep tweets that contain a topic token
@@ -111,7 +122,7 @@ object App {
           val tweet = tokenizer.tokenizeTweet(status.getText)
           val tokens = tweet.getTokens.asScala ++ status.getHashtagEntities.map(ht => ht.getText)
           (status, tokens.map(str => str.toLowerCase))
-        })
+        }).filter(tuple => tuple._2.size >= MIN_TOKENS)
 
     // Convert (tweet, tokens) to (user_id, tokenSet) to (token, 1)
     //  This conversion lets us count only one token per user
@@ -144,6 +155,7 @@ object App {
 
         // Should be (token, Map[Date, Int])
         val datedPairs = rdd.map(tuple => (tuple._1, Map(dateTag -> tuple._2)))
+        println("Date: " + dateTag.toString + ", Token Count: " + datedPairs.count())
         datedPairs.persist
         rddList = rddList :+ datedPairs
         
@@ -194,57 +206,91 @@ object App {
       })
 
     // Find tweets containing the bursty tokens
-    val tweetWindowStream = topicalTweetStream
+    val tweetWindowStream = tweetTokenPairs
       .window(
         Seconds(MAJOR_WINDOW_SIZE * 60),
         Seconds(60))
 
     var taggedTweets : Set[Long] = Set.empty
+    var taggedTweetTokens : List[List[String]] = List.empty
     tweetWindowStream.foreachRDD((rdd, time) => {
-      println("Status RDD Time: " + time)
-      val outputFileWriter = new FileWriter(outputFile, true)
 
-      var capturedTweets : Map[Status, Int] = Map.empty
+      val tweetFinderStatus = future {
+        println("Status RDD Time: " + time)
+        val outputFileWriter = new FileWriter(outputFile, true)
 
-      println("Bursting Keyword Count: " + burstingKeywords.size + ", " + burstingKeywords.nonEmpty)
+        var capturedTweets: Map[Status, Int] = Map.empty
 
-      var targetTokens : List[String] = List.empty
-      while ( burstingKeywords.nonEmpty ) {
-        val (token, newQ) = burstingKeywords.dequeue
-        burstingKeywords = newQ
+        println("Bursting Keyword Count: " + burstingKeywords.size + ", " + burstingKeywords.nonEmpty)
 
-        targetTokens = targetTokens :+ token
-      }
-      println("Finding tweets containing: %s".format(targetTokens))
+        var targetTokens: List[String] = List.empty
+        while (burstingKeywords.nonEmpty) {
+          val (token, newQ) = burstingKeywords.dequeue
+          burstingKeywords = newQ
 
-      val targetTweets : Array[Status] = rdd.filter(status => {
-        var flag = false
-
-        for ( token <- targetTokens ) {
-          if ( status.getText.toLowerCase.contains(token) ) {
-            flag = true
-          }
+          targetTokens = targetTokens :+ token
         }
-        flag
-      }).collect
+        println("Finding tweets containing: %s".format(targetTokens))
 
-      for ( tweet <- targetTweets ) {
-        capturedTweets = capturedTweets ++ Map(tweet -> (capturedTweets.getOrElse(tweet, 0) + 1))
-      }
+        val targetTweets = rdd.filter(tuple => {
+          val status = tuple._1
+          var flag = false
 
-      val topMatches : Iterable[Status] = capturedTweets
-        .filter(tuple => tuple._2 == capturedTweets.values.max)
-        .map(tuple => tuple._1)
+          for (token <- targetTokens) {
+            if (status.getText.toLowerCase.contains(token)) {
+              flag = true
+            }
+          }
+          flag
+        }).collect.toMap
 
-      for ( tweet <- topMatches.take(PER_MINUTE_MAX) ) {
-        if ( taggedTweets.contains(tweet.getId) == false ) {
+        for (tweet <- targetTweets.keys) {
+          capturedTweets = capturedTweets ++ Map(tweet -> (capturedTweets.getOrElse(tweet, 0) + 1))
+        }
+
+        val topMatches: List[Status] = capturedTweets
+          .filter(tuple => tuple._2 == capturedTweets.values.max)
+          .map(tuple => tuple._1)
+          .toList
+          .sortBy(status => status.getCreatedAt)
+          .reverse
+
+        val leastSimilarTweets : List[(Double, Status)] = topMatches
+          .filter(tweet => taggedTweets.contains(tweet.getId) == false)
+          .map(tweet => {
+            val tweetTokens = targetTweets(tweet).toList
+
+            // Compute Jaccard similarity
+            var jaccardSim = 0.0
+            for ( tokenSet <- taggedTweetTokens ) {
+              val intersectionSize = tokenSet.intersect(tweetTokens).distinct.size
+              val unionSize = (tokenSet ++ tweetTokens).distinct.size
+
+              val localJaccardSim = intersectionSize.toDouble / unionSize.toDouble
+
+              jaccardSim = Math.max(localJaccardSim, jaccardSim)
+            }
+
+            taggedTweets = taggedTweets + tweet.getId
+            taggedTweetTokens = taggedTweetTokens :+ tweetTokens
+
+            (jaccardSim, tweet)
+          })
+          .filter(tuple => tuple._1 <= SIM_THRESHOLD)
+          .sortBy(tuple => tuple._1)
+          .reverse
+          .take(PER_MINUTE_MAX)
+
+        leastSimilarTweets.map(tuple => {
+          val tweet = tuple._2
+          val tweetTokens = targetTweets(tweet).toList
 
           val lowerTweetText = tweet.getText.toLowerCase
           var topicIds = ""
-          for ( topic <- topicList ) {
+          for (topic <- topicList) {
             breakable {
               for (token <- topic.tokens) {
-                if ( lowerTweetText.contains(token) ) {
+                if (lowerTweetText.contains(token)) {
                   topicIds += topic.num + "+"
                   break
                 }
@@ -252,15 +298,19 @@ object App {
             }
           }
 
-          taggedTweets = taggedTweets + tweet.getId
-          val logEntry : String = createCsvString(topicIds, time, tweet.getId, tweet.getText)
+          val logEntry: String = createCsvString(topicIds, time, tweet.getId, tweet.getText)
 
           print(logEntry)
           outputFileWriter.write(logEntry)
-        }
+        })
+
+        outputFileWriter.close()
       }
 
-      outputFileWriter.close()
+      tweetFinderStatus.onComplete {
+        case Success(x) => println("Tweet finder SUCCESS")
+        case Failure(ex) => println("Tweet finder FAILURE: " + ex.getMessage)
+      }
     })
     
     ssc.start()

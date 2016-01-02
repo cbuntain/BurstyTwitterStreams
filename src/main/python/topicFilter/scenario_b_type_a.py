@@ -45,6 +45,7 @@ wnl = WordNetLemmatizer()
 specCharRegex = re.compile(r"[^a-zA-Z0-9\\s]")
 
 outputRows = []
+tweetIds = set()
 with codecs.open(sparkCsvFilePath, "r", "utf-8") as f:
 
     df = pd.read_csv(sparkCsvFilePath, header=None)
@@ -54,6 +55,11 @@ with codecs.open(sparkCsvFilePath, "r", "utf-8") as f:
         captureTime = row[1]
         tweetId = row[2]
         tweetText = row[3]
+
+        if ( tweetId in tweetIds ):
+            continue
+
+        tweetIds.add(tweetId)
 
         gmTime = time.gmtime(captureTime)
         timeTuple = (gmTime.tm_year, gmTime.tm_mon, gmTime.tm_mday)
