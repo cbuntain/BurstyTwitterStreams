@@ -23,15 +23,9 @@ import scala.collection.JavaConverters._
 import scala.util.control.Breaks._
 
 object TopicFilter {
-  val MINOR_WINDOW_SIZE = Conf.MINOR_WINDOW_SIZE
-  val MAJOR_WINDOW_SIZE = Conf.MAJOR_WINDOW_SIZE
-  val PER_MINUTE_MAX = Conf.PER_MINUTE_MAX
-  val THRESHOLD = Conf.BURST_THRESHOLD
-  val SIM_THRESHOLD = Conf.SIM_THRESHOLD
 
-  val MAX_HASHTAGS = Conf.MAX_HASHTAGS
-  val MAX_URLS = Conf.MAX_URLS
-  val MIN_TOKENS = Conf.MIN_TOKENS
+  // Job configuration
+  var burstConf : Conf = null
 
   implicit val formats = DefaultFormats // Brings in default date formats etc.
   case class Topic(title: String, num: String, tokens: List[String])
@@ -85,10 +79,7 @@ object TopicFilter {
       val status = tuple._2
 
       status != null &&
-        status.getLang.compareToIgnoreCase("en") == 0 &&
-        !status.getText.toLowerCase.contains("follow") &&
-        status.getHashtagEntities.size <= MAX_HASHTAGS &&
-        status.getURLEntities.size <= MAX_URLS
+        status.getLang.compareToIgnoreCase("en") == 0
     })
 
     // Only keep tweets that contain a topic token

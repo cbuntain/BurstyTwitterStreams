@@ -36,15 +36,6 @@ import ExecutionContext.Implicits.global
 import scala.util.{Success, Failure}
 
 object App {
-  val MINOR_WINDOW_SIZE = Conf.MINOR_WINDOW_SIZE
-  val MAJOR_WINDOW_SIZE = Conf.MAJOR_WINDOW_SIZE
-  val PER_MINUTE_MAX = Conf.PER_MINUTE_MAX
-  val THRESHOLD = Conf.BURST_THRESHOLD
-  val SIM_THRESHOLD = Conf.SIM_THRESHOLD
-
-  val MAX_HASHTAGS = Conf.MAX_HASHTAGS
-  val MAX_URLS = Conf.MAX_URLS
-  val MIN_TOKENS = Conf.MIN_TOKENS
 
   implicit val formats = DefaultFormats // Brings in default date formats etc.
   case class Topic(title: String, num: String, tokens: List[String])
@@ -59,12 +50,15 @@ object App {
     val ssc = new StreamingContext(sc, Seconds(1))
     ssc.checkpoint("./checkpointDirectory")
 
-    val topicsFile = args(0)
-    val outputFile = args(1)
+    val propertiesPath = args(0)
+    val topicsFile = args(1)
+    val outputFile = args(2)
+
+    val burstConf = new Conf(propertiesPath)
 
     var numTasks = 8
-    if ( args.size > 2 ) {
-      numTasks = args(2).toInt
+    if ( args.size > 3 ) {
+      numTasks = args(3).toInt
     }
 
     val topicsJsonStr = scala.io.Source.fromFile(topicsFile).mkString
@@ -92,8 +86,8 @@ object App {
       .filter(status => {
         status.getLang.compareToIgnoreCase("en") == 0 &&
         !status.getText.toLowerCase.contains("follow") &&
-        status.getHashtagEntities.size <= MAX_HASHTAGS &&
-        status.getURLEntities.size <= MAX_URLS
+        status.getHashtagEntities.size <= burstConf.maxHashtags &&
+        status.getURLEntities.size <= burstConf.maxUrls
     })
 
     // Only keep tweets that contain a topic token
@@ -122,7 +116,7 @@ object App {
           val tweet = tokenizer.tokenizeTweet(status.getText)
           val tokens = tweet.getTokens.asScala ++ status.getHashtagEntities.map(ht => ht.getText)
           (status, tokens.map(str => str.toLowerCase))
-        }).filter(tuple => tuple._2.size >= MIN_TOKENS)
+        }).filter(tuple => tuple._2.size >= burstConf.minTokens)
 
     // Convert (tweet, tokens) to (user_id, tokenSet) to (token, 1)
     //  This conversion lets us count only one token per user
@@ -134,7 +128,7 @@ object App {
     val counts = userCounts
     val windowSum = counts.reduceByKeyAndWindow(
       (a:Int,b:Int) => (a + b), 
-      Seconds(MINOR_WINDOW_SIZE * 60), 
+      Seconds(burstConf.minorWindowSize * 60),
       Seconds(60),
       numTasks
     )
@@ -179,9 +173,9 @@ object App {
         println("\nPopular topics, Now: %s, Window: %s".format(new Date().toString, dateList.last.toString))
         topList.foreach{case (tag, score) => println("%s - %f".format(tag, score))}
 
-        if ( rddCount >= MAJOR_WINDOW_SIZE ) {
+        if ( rddCount >= burstConf.majorWindowSize ) {
           val targetKeywords = sortedScores
-            .filter(tuple => tuple._2 > THRESHOLD)
+            .filter(tuple => tuple._2 > burstConf.burstThreshold)
             .map(tuple => tuple._1).collect
 
           println("Over threshold count: " + targetKeywords.size)
@@ -191,14 +185,14 @@ object App {
         }
         
         // Prune the date and rdd lists as needed
-        if ( dateList.size == MAJOR_WINDOW_SIZE ) {
+        if ( dateList.size == burstConf.majorWindowSize ) {
           
           // Drop the earliest date
-          dateList = dateList.slice(1, MAJOR_WINDOW_SIZE)
+          dateList = dateList.slice(1, burstConf.majorWindowSize)
           
           // Drop the earliest RDD and unpersist it
           val earliestRdd = rddList.head
-          rddList = rddList.slice(1, MAJOR_WINDOW_SIZE)
+          rddList = rddList.slice(1, burstConf.majorWindowSize)
           earliestRdd.unpersist(false)
         }
         
@@ -208,7 +202,7 @@ object App {
     // Find tweets containing the bursty tokens
     val tweetWindowStream = tweetTokenPairs
       .window(
-        Seconds(MAJOR_WINDOW_SIZE * 60),
+        Seconds(burstConf.majorWindowSize * 60),
         Seconds(60))
 
     var taggedTweets : Set[Long] = Set.empty
@@ -276,10 +270,10 @@ object App {
 
             (jaccardSim, tweet)
           })
-          .filter(tuple => tuple._1 <= SIM_THRESHOLD)
+          .filter(tuple => tuple._1 <= burstConf.similarityThreshold)
           .sortBy(tuple => tuple._1)
           .reverse
-          .take(PER_MINUTE_MAX)
+          .take(burstConf.perMinuteMax)
 
         leastSimilarTweets.map(tuple => {
           val tweet = tuple._2

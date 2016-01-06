@@ -39,16 +39,19 @@ object LearnerStatistics {
     val conf = new SparkConf().setAppName("Twitter Summary Statistics")
       .set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
     val sc = new SparkContext(conf)
-    
-    val dataPath = args(0)
-    val outputPath = args(1)
+
+    val propertiesPath = args(0)
+    val burstConf = new Conf(propertiesPath)
+
+    val dataPath = args(1)
+    val outputPath = args(2)
     
     val twitterMsgsRaw = sc.textFile(dataPath)
     println("Initial Partition Count: " + twitterMsgsRaw.partitions.size)
     
     var twitterMsgs = twitterMsgsRaw
-    if ( args.size > 2 ) {
-      val initialPartitions = args(2).toInt
+    if ( args.size > 3 ) {
+      val initialPartitions = args(3).toInt
       twitterMsgs = twitterMsgsRaw.repartition(initialPartitions)
       println("New Partition Count: " + twitterMsgs.partitions.size)
     }
@@ -161,7 +164,7 @@ object LearnerStatistics {
     
     // Create a map and invert map for our date list, so we can merge dates 
     //  for the minor window
-    val windows = mergeToMinorWindows(tokenizedTweets, fullKeyList, Conf.MINOR_WINDOW_SIZE)
+    val windows = mergeToMinorWindows(tokenizedTweets, fullKeyList, burstConf.minorWindowSize)
     printf("windows Partition Size: " + windows.partitions.size + "\n")
     
     // Create an RDD of dates to user token counts
@@ -172,7 +175,7 @@ object LearnerStatistics {
     val outputFileWriter = new FileWriter(outputPath, true)
 
     // Slide over the date list using our major window size
-    for (dateWindow <- fullKeyList.sliding(Conf.MAJOR_WINDOW_SIZE)) {
+    for (dateWindow <- fullKeyList.sliding(burstConf.majorWindowSize)) {
       
       // Only keep those dates that are in this window
       val thisWindowRdd = datedUserFrequencies.filter(tuple => {

@@ -9,6 +9,7 @@ package edu.umd.cs.hcil.twitter.spark.learners
 import java.io.FileWriter
 import java.util.Date
 
+import scala.io.Source
 import edu.umd.cs.hcil.twitter.spark.common.{Conf, ScoreGenerator}
 import edu.umd.cs.hcil.twitter.spark.utils.DateUtils
 import edu.umd.cs.twitter.tokenizer.TweetTokenizer
@@ -17,12 +18,12 @@ import org.apache.spark._
 import org.apache.spark.rdd.RDD
 import org.json4s._
 import org.json4s.jackson.JsonMethods._
-import twitter4j.{Status, TwitterObjectFactory, TwitterException}
+import twitter4j.{Status, TwitterObjectFactory}
 
 import scala.collection.JavaConverters._
 import scala.util.control.Breaks._
 
-object OfflineApp {
+object BatchTweetFinder {
 
   implicit val formats = DefaultFormats // Brings in default date formats etc.
   case class Topic(title: String, num: String, tokens: List[String])
@@ -31,27 +32,42 @@ object OfflineApp {
   var taggedTweets : Set[Long] = Set.empty
   var taggedTweetTokens : List[List[String]] = List.empty
 
+  // A wicked hack to perform expensive instantiation of the CoreNLP pipeline.
+  //  The transient annotation says to have a different coreNLP object in each
+  //  JVM, and the lazy tag tells the JVM to instantiate the object on first use
+  //  As a result, each node gets its own copy
+  object TransientTokenizer {
+    @transient lazy val tokenizer = new TweetTokenizer()
+  }
+
   /**
    * @param args the command line arguments
    */
   def main(args: Array[String]): Unit = {
 
-    val conf = new SparkConf().setAppName("TREC Offline Analyzer")
+    val conf = new SparkConf().setAppName("TREC Offline Tweet Finder")
     val sc = new SparkContext(conf)
 
     val propertiesPath = args(0)
     val dataPath = args(1)
-    val topicsFile = args(2)
-    val outputFile = args(3)
+    val keywordFile = args(2)
+    val topicsFile = args(3)
+    val outputFile = args(4)
 
     val burstConf = new Conf(propertiesPath)
+    val burstyKeywordMap = parseKeywordFile(keywordFile)
+    val datesWithKeywords = burstyKeywordMap.keys.filter(k => {
+      burstyKeywordMap(k).filter(tuple => {
+        tuple._2 > burstConf.burstThreshold
+      }).size > 0
+    })
 
     val twitterMsgsRaw = sc.textFile(dataPath)
     println("Initial Partition Count: " + twitterMsgsRaw.partitions.size)
 
     var twitterMsgs = twitterMsgsRaw
-    if (args.size > 4) {
-      val initialPartitions = args(4).toInt
+    if (args.size > 5) {
+      val initialPartitions = args(5).toInt
       twitterMsgs = twitterMsgsRaw.repartition(initialPartitions)
       println("New Partition Count: " + twitterMsgs.partitions.size)
     }
@@ -154,11 +170,15 @@ object OfflineApp {
     val fullKeyList = DateUtils.constructDateList(minTime, maxTime)
     println("Date Key List Size: " + fullKeyList.size)
 
+    // Iterate through the dates we know have bursty keywords
+//    for ( time <- datesWithKeywords ) {
+//      val dateIndex = fullKeyList.indexOf(time)
+//    }
+
     // Build a slider of the last MAJOR_WINDOW_SIZE minutes
     var rddCount = 0
     var dateList: List[Date] = List.empty
     var tweetRddList: List[RDD[(Status, List[String])]] = List.empty
-    var rddList: List[RDD[Tuple2[String, Map[Date, Int]]]] = List.empty
     for ( time <- fullKeyList ) {
       val dateTag = time
       dateList = dateList :+ dateTag
@@ -175,43 +195,32 @@ object OfflineApp {
       // Create pairs of statuses and tokens in those statuses
       val tweetTokenPairs = thisDatesRdd.map(tuple => {
         val status = tuple._2
-        val tokenizer = new TweetTokenizer
-        val tweet = tokenizer.tokenizeTweet(status.getText)
-        val tokens = tweet.getTokens.asScala ++ status.getHashtagEntities.map(ht => ht.getText)
-        (status, tokens.map(str => str.toLowerCase).toList)
+        val tweetText = status.getText
+
+        try {
+          val tweet = TransientTokenizer.tokenizer.tokenizeTweet(tweetText)
+          val tokens = tweet.getTokens.asScala ++ status.getHashtagEntities.map(ht => ht.getText)
+          (status, tokens.map(str => str.toLowerCase).toList)
+        } catch {
+          case iae : IllegalArgumentException => {
+            println(s"Tweet [$tweetText] caused tokenizer to fail with illegal argument.")
+            (status, List.empty)
+          }
+          case e : Exception => {
+            println(s"Tweet [$tweetText] caused tokenizer to fail with exception: " + e.toString)
+            (status, List.empty)
+          }
+        }
       }).filter(tuple => tuple._2.size >= burstConf.minTokens)
       tweetTokenPairs.persist()
       tweetRddList = tweetRddList :+ tweetTokenPairs
 
-      // Convert (tweet, tokens) to (user_id, tokenSet) to (token, 1)
-      //  This conversion lets us count only one token per user
-      val rdd = tweetTokenPairs
-        .map(pair => (pair._1.getUser.getId, pair._2.toSet))
-        .reduceByKey(_ ++ _)
-        .flatMap(pair => pair._2).map(token => (token, 1))
-        .reduceByKey(_ + _)
-
-      // Should be (token, Map[Date, Int])
-      val datedPairs = rdd.map(tuple => (tuple._1, Map(dateTag -> tuple._2)))
-      println("Date: " + dateTag.toString + ", Token Count: " + datedPairs.count() + ", Tweet Count: " + thisDatesRdd.count())
-      datedPairs.persist
-      rddList = rddList :+ datedPairs
-
-      val earliestDate = dateList(0)
-      println("Earliest Date: " + earliestDate)
-
-      // Merge all the RDDs in our list, so we have a full set of tokens that occur in this window
-      val mergingRdd: RDD[Tuple2[String, Map[Date, Int]]] = rddList.reduce((rdd1, rdd2) => {
-        rdd1 ++ rdd2
-      })
-
-      // Combine all the date maps for each token
-      val combinedRddPre: RDD[Tuple2[String, Map[Date, Int]]] = mergingRdd.reduceByKey((a, b) => {
-        a ++ b
-      })
-
-      val scores: RDD[Tuple2[String, Double]] = ScoreGenerator.scoreFrequencyArray(combinedRddPre, dateList)
-      val sortedScores = scores.sortBy(tuple => tuple._2, false)
+      val scores: List[(String, Double)] = if ( burstyKeywordMap.keySet.contains(dateTag) ) {
+        burstyKeywordMap(dateTag).toList
+      } else {
+        List.empty
+      }
+      val sortedScores = scores.sortBy(tuple => tuple._2).reverse
 
       val topList = sortedScores.take(20)
       println("\nPopular topics, Now: %s, Window: %s".format(new Date().toString, dateList.last.toString))
@@ -224,10 +233,10 @@ object OfflineApp {
       if (rddCount >= burstConf.majorWindowSize) {
         val targetKeywords = sortedScores
           .filter(tuple => tuple._2 > burstConf.burstThreshold)
-          .map(tuple => tuple._1).collect
+          .map(tuple => tuple._1)
 
         println("Over threshold count: " + targetKeywords.size)
-        val topTokens: List[String] = targetKeywords.take(10).toList
+        val topTokens: List[String] = targetKeywords.take(10)
 
         burstingKeywords = burstingKeywords ++ topTokens
         println("Bursting Keywords count: " + burstingKeywords.size)
@@ -245,11 +254,6 @@ object OfflineApp {
         // Drop the earliest date
         dateList = dateList.slice(1, burstConf.majorWindowSize)
 
-        // Drop the earliest RDD and unpersist it
-        val earliestRdd = rddList.head
-        rddList = rddList.slice(1, burstConf.majorWindowSize)
-        earliestRdd.unpersist(false)
-
         // Drop the earliest tweet RDD as well
         val earliestTweetRdd = tweetRddList.head
         tweetRddList = tweetRddList.slice(1, burstConf.majorWindowSize)
@@ -259,6 +263,25 @@ object OfflineApp {
       rddCount += 1
     }
 
+  }
+
+  case class Keywords(date: Long, pairs: Map[String, Double])
+
+  def parseKeywordFile(keywordFilePath : String) : Map[Date, Map[String, Double]] = {
+
+    var dateMap : Map[Date, Map[String, Double]] = Map.empty
+
+    for (line <- Source.fromFile(keywordFilePath).getLines()) {
+      val json = parse(line)
+      val keywordMap = json.extract[Keywords]
+
+      val thisDate : Date = new Date(keywordMap.date)
+      val pairs : Map[String, Double] = keywordMap.pairs
+
+      dateMap = dateMap ++ Map(thisDate -> pairs)
+    }
+
+    return dateMap
   }
 
   def createCsvString(topic : String, time : Date, tweetId : Long, text : String) : String = {
@@ -277,7 +300,7 @@ object OfflineApp {
                       time : Date,
                       targetTokens : List[String],
                       tweetRddList: List[RDD[(Status, List[String])]],
-                      topicList : List[OfflineApp.Topic],
+                      topicList : List[BatchTweetFinder.Topic],
                       burstConf : Conf) : List[String] = {
 
     println("Status RDD Time: " + time)

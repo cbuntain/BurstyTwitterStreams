@@ -17,12 +17,13 @@ import org.apache.spark._
 import org.apache.spark.rdd.RDD
 import org.json4s._
 import org.json4s.jackson.JsonMethods._
-import twitter4j.{Status, TwitterObjectFactory, TwitterException}
+import twitter4j.{Status, TwitterObjectFactory}
 
 import scala.collection.JavaConverters._
 import scala.util.control.Breaks._
+import scala.util.parsing.json.{JSONFormat, JSONObject}
 
-object OfflineApp {
+object BatchTokenScorer {
 
   implicit val formats = DefaultFormats // Brings in default date formats etc.
   case class Topic(title: String, num: String, tokens: List[String])
@@ -43,6 +44,7 @@ object OfflineApp {
     val dataPath = args(1)
     val topicsFile = args(2)
     val outputFile = args(3)
+    val minimumBurstValue = args(4).toDouble
 
     val burstConf = new Conf(propertiesPath)
 
@@ -50,8 +52,8 @@ object OfflineApp {
     println("Initial Partition Count: " + twitterMsgsRaw.partitions.size)
 
     var twitterMsgs = twitterMsgsRaw
-    if (args.size > 4) {
-      val initialPartitions = args(4).toInt
+    if (args.size > 5) {
+      val initialPartitions = args(5).toInt
       twitterMsgs = twitterMsgsRaw.repartition(initialPartitions)
       println("New Partition Count: " + twitterMsgs.partitions.size)
     }
@@ -217,27 +219,24 @@ object OfflineApp {
       println("\nPopular topics, Now: %s, Window: %s".format(new Date().toString, dateList.last.toString))
       topList.foreach { case (tag, score) => println("%s - %f".format(tag, score)) }
 
-      // Bursty keywords to look for in tweets
-      var burstingKeywords : List[String] = List.empty
-
       // Only look for bursty tokens if we're beyond the major window size
       if (rddCount >= burstConf.majorWindowSize) {
         val targetKeywords = sortedScores
-          .filter(tuple => tuple._2 > burstConf.burstThreshold)
-          .map(tuple => tuple._1).collect
-
+          .filter(tuple => tuple._2 > minimumBurstValue)
+          .collect
         println("Over threshold count: " + targetKeywords.size)
-        val topTokens: List[String] = targetKeywords.take(10).toList
 
-        burstingKeywords = burstingKeywords ++ topTokens
-        println("Bursting Keywords count: " + burstingKeywords.size)
+
+        // Print JSON string with this date and list of token-score tuples
+        // dateTag, targetKeywords
+        val datedTokenScoreMap = Map("date" -> dateTag, "pairs" -> targetKeywords.toMap)
+        val jsonMap = JSONObject(datedTokenScoreMap)
+
+        // Find the best tweets containing the top tokens and write to output file
+        val outputFileWriter = new FileWriter(outputFile, true)
+        outputFileWriter.write(jsonMap.toString(jsonFormatter) + "\n")
+        outputFileWriter.close()
       }
-
-      // Find the best tweets containing the top tokens and write to output file
-      val outputFileWriter = new FileWriter(outputFile, true)
-      val logEntries = findGoodTweets(time, burstingKeywords, tweetRddList, topicList, burstConf)
-      logEntries.foreach(logEntry => outputFileWriter.write(logEntry))
-      outputFileWriter.close()
 
       // Prune the date and rdd lists as needed
       if (dateList.size == burstConf.majorWindowSize) {
@@ -261,106 +260,11 @@ object OfflineApp {
 
   }
 
-  def createCsvString(topic : String, time : Date, tweetId : Long, text : String) : String = {
-    val buff = new StringBuffer()
-    val writer = new CSVPrinter(buff, CSVFormat.DEFAULT)
-
-    writer.print(topic)
-    writer.print(time.getTime / 1000)
-    writer.print(tweetId)
-    writer.print(text.replace("\n", " "))
-
-    buff.toString + "\n"
-  }
-
-  def findGoodTweets(
-                      time : Date,
-                      targetTokens : List[String],
-                      tweetRddList: List[RDD[(Status, List[String])]],
-                      topicList : List[OfflineApp.Topic],
-                      burstConf : Conf) : List[String] = {
-
-    println("Status RDD Time: " + time)
-
-    var logEntries : List[String] = List.empty
-    var capturedTweets: Map[Status, Int] = Map.empty
-
-    println("Bursting Keyword Count: " + targetTokens.size)
-    println("Finding tweets containing: %s".format(targetTokens))
-
-    val rdd = tweetRddList.reduce((l, r) => l ++ r)
-    val targetTweets = rdd.filter(tuple => {
-      val status = tuple._1
-      var flag = false
-
-      for (token <- targetTokens) {
-        if (status.getText.toLowerCase.contains(token)) {
-          flag = true
-        }
-      }
-      flag
-    }).collect().toMap
-
-    for (tweet <- targetTweets.keys) {
-      capturedTweets = capturedTweets ++ Map(tweet -> (capturedTweets.getOrElse(tweet, 0) + 1))
+  def jsonFormatter (x : Any) : String = {
+    x match {
+      case m : Map[_, _] => JSONObject(m.asInstanceOf[Map[String,Object]]).toString()
+      case d : Date => d.getTime.toString
+      case _ => JSONFormat.defaultFormatter(x)
     }
-
-    val topMatches: List[Status] = capturedTweets
-      .filter(tuple => tuple._2 == capturedTweets.values.max)
-      .map(tuple => tuple._1)
-      .toList
-      .sortBy(status => status.getCreatedAt)
-      .reverse
-
-    val leastSimilarTweets : List[(Double, Status)] = topMatches
-      .filter(tweet => taggedTweets.contains(tweet.getId) == false)
-      .map(tweet => {
-        val tweetTokens = targetTweets(tweet).toList
-
-        // Compute Jaccard similarity
-        var jaccardSim = 0.0
-        for ( tokenSet <- taggedTweetTokens ) {
-          val intersectionSize = tokenSet.intersect(tweetTokens).distinct.size
-          val unionSize = (tokenSet ++ tweetTokens).distinct.size
-
-          val localJaccardSim = intersectionSize.toDouble / unionSize.toDouble
-
-          jaccardSim = Math.max(localJaccardSim, jaccardSim)
-        }
-
-        taggedTweets = taggedTweets + tweet.getId
-        taggedTweetTokens = taggedTweetTokens :+ tweetTokens
-
-        (jaccardSim, tweet)
-      })
-      .filter(tuple => tuple._1 <= burstConf.similarityThreshold)
-      .sortBy(tuple => tuple._1)
-      .reverse
-      .take(burstConf.perMinuteMax)
-
-    leastSimilarTweets.map(tuple => {
-      val tweet = tuple._2
-
-      val lowerTweetText = tweet.getText.toLowerCase
-      var topicIds = ""
-      for (topic <- topicList) {
-        breakable {
-          for (token <- topic.tokens) {
-            if (lowerTweetText.contains(token)) {
-              topicIds += topic.num + "+"
-              break
-            }
-          }
-        }
-      }
-
-      val logEntry: String = createCsvString(topicIds, time, tweet.getId, tweet.getText)
-
-      print(logEntry)
-
-      logEntries = logEntries :+ logEntry
-    })
-
-    return logEntries
   }
 }
