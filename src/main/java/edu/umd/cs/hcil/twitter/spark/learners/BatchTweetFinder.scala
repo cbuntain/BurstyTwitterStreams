@@ -60,7 +60,7 @@ object BatchTweetFinder {
       burstyKeywordMap(k).filter(tuple => {
         tuple._2 > burstConf.burstThreshold
       }).size > 0
-    })
+    }).toList.sorted
 
     val twitterMsgsRaw = sc.textFile(dataPath)
     println("Initial Partition Count: " + twitterMsgsRaw.partitions.size)
@@ -171,98 +171,104 @@ object BatchTweetFinder {
     println("Date Key List Size: " + fullKeyList.size)
 
     // Iterate through the dates we know have bursty keywords
-//    for ( time <- datesWithKeywords ) {
-//      val dateIndex = fullKeyList.indexOf(time)
-//    }
+    for ( burstTime <- datesWithKeywords ) {
+      val dateIndex = fullKeyList.indexOf(burstTime)
+      val firstIndex = dateIndex - burstConf.majorWindowSize
 
-    // Build a slider of the last MAJOR_WINDOW_SIZE minutes
-    var rddCount = 0
-    var dateList: List[Date] = List.empty
-    var tweetRddList: List[RDD[(Status, List[String])]] = List.empty
-    for ( time <- fullKeyList ) {
-      val dateTag = time
-      dateList = dateList :+ dateTag
+      println("Burst Time: " + burstTime)
 
-      println("Window Count: " + rddCount)
-      println("Dates so far: " + dateList)
+      val dateRange = fullKeyList.slice(firstIndex, dateIndex + 1)
+      println("Start Time: " + dateRange.head)
+      println("End Time: " + dateRange.last)
 
-      // Need to filter for only those tweets from this time.
-      val thisDatesRdd = timedTopicalTweetStream.filter(tuple => {
-        val thisTime = tuple._1
-        (thisTime.compareTo(time) == 0)
-      })
+      // Build a slider of the last MAJOR_WINDOW_SIZE minutes
+      var rddCount = 0
+      var dateList: List[Date] = List.empty
+      var tweetRddList: List[RDD[(Status, List[String])]] = List.empty
+      for ( time <- dateRange ) {
+        val dateTag = time
+        dateList = dateList :+ dateTag
 
-      // Create pairs of statuses and tokens in those statuses
-      val tweetTokenPairs = thisDatesRdd.map(tuple => {
-        val status = tuple._2
-        val tweetText = status.getText
+        println("Window Count: " + rddCount)
+        println("Dates so far: " + dateList)
 
-        try {
-          val tweet = TransientTokenizer.tokenizer.tokenizeTweet(tweetText)
-          val tokens = tweet.getTokens.asScala ++ status.getHashtagEntities.map(ht => ht.getText)
-          (status, tokens.map(str => str.toLowerCase).toList)
-        } catch {
-          case iae : IllegalArgumentException => {
-            println(s"Tweet [$tweetText] caused tokenizer to fail with illegal argument.")
-            (status, List.empty)
+        // Need to filter for only those tweets from this time.
+        val thisDatesRdd = timedTopicalTweetStream.filter(tuple => {
+          val thisTime = tuple._1
+          (thisTime.compareTo(time) == 0)
+        })
+
+        // Create pairs of statuses and tokens in those statuses
+        val tweetTokenPairs = thisDatesRdd.map(tuple => {
+          val status = tuple._2
+          val tweetText = status.getText
+
+          try {
+            val tweet = TransientTokenizer.tokenizer.tokenizeTweet(tweetText)
+            val tokens = tweet.getTokens.asScala ++ status.getHashtagEntities.map(ht => ht.getText)
+            (status, tokens.map(str => str.toLowerCase).toList)
+          } catch {
+            case iae : IllegalArgumentException => {
+              println(s"Tweet [$tweetText] caused tokenizer to fail with illegal argument.")
+              (status, List.empty)
+            }
+            case e : Exception => {
+              println(s"Tweet [$tweetText] caused tokenizer to fail with exception: " + e.toString)
+              (status, List.empty)
+            }
           }
-          case e : Exception => {
-            println(s"Tweet [$tweetText] caused tokenizer to fail with exception: " + e.toString)
-            (status, List.empty)
-          }
+        }).filter(tuple => tuple._2.size >= burstConf.minTokens)
+        tweetTokenPairs.persist()
+        tweetRddList = tweetRddList :+ tweetTokenPairs
+
+        val scores: List[(String, Double)] = if ( burstyKeywordMap.keySet.contains(dateTag) ) {
+          burstyKeywordMap(dateTag).toList
+        } else {
+          List.empty
         }
-      }).filter(tuple => tuple._2.size >= burstConf.minTokens)
-      tweetTokenPairs.persist()
-      tweetRddList = tweetRddList :+ tweetTokenPairs
+        val sortedScores = scores.sortBy(tuple => tuple._2).reverse
 
-      val scores: List[(String, Double)] = if ( burstyKeywordMap.keySet.contains(dateTag) ) {
-        burstyKeywordMap(dateTag).toList
-      } else {
-        List.empty
+        val topList = sortedScores.take(20)
+        println("\nPopular topics, Now: %s, Window: %s".format(new Date().toString, dateList.last.toString))
+        topList.foreach { case (tag, score) => println("%s - %f".format(tag, score)) }
+
+        // Bursty keywords to look for in tweets
+        var burstingKeywords : List[String] = List.empty
+
+        // Only look for bursty tokens if we're beyond the major window size
+        if (rddCount >= burstConf.majorWindowSize) {
+          val targetKeywords = sortedScores
+            .filter(tuple => tuple._2 > burstConf.burstThreshold)
+            .map(tuple => tuple._1)
+
+          println("Over threshold count: " + targetKeywords.size)
+          val topTokens: List[String] = targetKeywords.take(10)
+
+          burstingKeywords = burstingKeywords ++ topTokens
+          println("Bursting Keywords count: " + burstingKeywords.size)
+        }
+
+        // Find the best tweets containing the top tokens and write to output file
+        val outputFileWriter = new FileWriter(outputFile, true)
+        val logEntries = findGoodTweets(time, burstingKeywords, tweetRddList, topicList, burstConf)
+        logEntries.foreach(logEntry => outputFileWriter.write(logEntry))
+        outputFileWriter.close()
+
+        // Prune the date and rdd lists as needed
+        if (dateList.size == burstConf.majorWindowSize) {
+
+          // Drop the earliest date
+          dateList = dateList.slice(1, burstConf.majorWindowSize)
+
+          // Drop the earliest tweet RDD as well
+          val earliestTweetRdd = tweetRddList.head
+          tweetRddList = tweetRddList.slice(1, burstConf.majorWindowSize)
+          earliestTweetRdd.unpersist(false)
+        }
+
+        rddCount += 1
       }
-      val sortedScores = scores.sortBy(tuple => tuple._2).reverse
-
-      val topList = sortedScores.take(20)
-      println("\nPopular topics, Now: %s, Window: %s".format(new Date().toString, dateList.last.toString))
-      topList.foreach { case (tag, score) => println("%s - %f".format(tag, score)) }
-
-      // Bursty keywords to look for in tweets
-      var burstingKeywords : List[String] = List.empty
-
-      // Only look for bursty tokens if we're beyond the major window size
-      if (rddCount >= burstConf.majorWindowSize) {
-        val targetKeywords = sortedScores
-          .filter(tuple => tuple._2 > burstConf.burstThreshold)
-          .map(tuple => tuple._1)
-
-        println("Over threshold count: " + targetKeywords.size)
-        val topTokens: List[String] = targetKeywords.take(10)
-
-        burstingKeywords = burstingKeywords ++ topTokens
-        println("Bursting Keywords count: " + burstingKeywords.size)
-      }
-
-      // Find the best tweets containing the top tokens and write to output file
-      val outputFileWriter = new FileWriter(outputFile, true)
-      val logEntries = findGoodTweets(time, burstingKeywords, tweetRddList, topicList, burstConf)
-      logEntries.foreach(logEntry => outputFileWriter.write(logEntry))
-      outputFileWriter.close()
-
-      // Prune the date and rdd lists as needed
-      if (dateList.size == burstConf.majorWindowSize) {
-
-        // Drop the earliest date
-        dateList = dateList.slice(1, burstConf.majorWindowSize)
-
-        // Drop the earliest tweet RDD as well
-        val earliestTweetRdd = tweetRddList.head
-        tweetRddList = tweetRddList.slice(1, burstConf.majorWindowSize)
-        earliestTweetRdd.unpersist(false)
-      }
-
-      rddCount += 1
     }
-
   }
 
   case class Keywords(date: Long, pairs: Map[String, Double])
