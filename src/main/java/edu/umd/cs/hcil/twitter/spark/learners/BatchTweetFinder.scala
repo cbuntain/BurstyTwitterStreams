@@ -170,9 +170,23 @@ object BatchTweetFinder {
     val fullKeyList = DateUtils.constructDateList(minTime, maxTime)
     println("Date Key List Size: " + fullKeyList.size)
 
+    // All times we need to process
+    var timeRanges : List[Date] = List.empty
+
+    /* TODO:::::
+     *
+     * Fix this. We're starting too early somehow and not getting the second dates
+     *
+     *
+     */
+
     // Iterate through the dates we know have bursty keywords
     for ( burstTime <- datesWithKeywords ) {
       val dateIndex = fullKeyList.indexOf(burstTime)
+
+      // I realize it should be + 1, but I have a consistent error in the OfflineApp
+      //  that has an off-by-one problem as well, so I'm doing this for consistency.
+      // val firstIndex = dateIndex - burstConf.majorWindowSize + 1
       val firstIndex = dateIndex - burstConf.majorWindowSize
 
       println("Burst Time: " + burstTime)
@@ -180,6 +194,36 @@ object BatchTweetFinder {
       val dateRange = fullKeyList.slice(firstIndex, dateIndex + 1)
       println("Start Time: " + dateRange.head)
       println("End Time: " + dateRange.last)
+
+      timeRanges = timeRanges ++ dateRange
+    }
+
+    // Prune duplicates
+    timeRanges = timeRanges.distinct.sorted
+
+    var dateRanges : List[(Int, Int)] = List.empty
+
+    var firstTime = timeRanges.head
+    for (i <- timeRanges.indices.drop(1)) {
+      val lastTime = timeRanges(i-1)
+      val thisTime = timeRanges(i)
+
+      val lastTimeIndex = fullKeyList.indexOf(lastTime)
+      val thisTimeIndex = fullKeyList.indexOf(thisTime)
+
+      if ( lastTimeIndex + 1 != thisTimeIndex ) {
+        val firstTimeIndex = fullKeyList.indexOf(firstTime)
+        dateRanges = dateRanges :+ (firstTimeIndex, lastTimeIndex + 1)
+
+        firstTime = thisTime
+      }
+    }
+
+    for ( dateRangeTuple <- dateRanges ) {
+
+      val dateRange = fullKeyList.slice(dateRangeTuple._1, dateRangeTuple._2)
+      println("Date Range:")
+      println("\t" + dateRange.head + " - " + dateRange.last)
 
       // Build a slider of the last MAJOR_WINDOW_SIZE minutes
       var rddCount = 0
@@ -238,6 +282,7 @@ object BatchTweetFinder {
         // Only look for bursty tokens if we're beyond the major window size
         if (rddCount >= burstConf.majorWindowSize) {
           val targetKeywords = sortedScores
+            .filter(tuple => tuple._1.length > 3)
             .filter(tuple => tuple._2 > burstConf.burstThreshold)
             .map(tuple => tuple._1)
 

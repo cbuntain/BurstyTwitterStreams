@@ -175,6 +175,7 @@ object App {
 
         if ( rddCount >= burstConf.majorWindowSize ) {
           val targetKeywords = sortedScores
+            .filter(tuple => tuple._1.length > 3)
             .filter(tuple => tuple._2 > burstConf.burstThreshold)
             .map(tuple => tuple._1).collect
 
