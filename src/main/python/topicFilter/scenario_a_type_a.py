@@ -45,7 +45,11 @@ specCharRegex = re.compile(r"[^a-zA-Z0-9\\s]")
 
 outputRows = []
 tweetIds = set()
+filLen = 0
 with codecs.open(sparkCsvFilePath, "r", "utf-8") as f:
+    filLen = len(f.read())
+
+if ( filLen > 0 ):
 
     df = pd.read_csv(sparkCsvFilePath, header=None)
     for (id, row) in df.iterrows():
@@ -99,7 +103,10 @@ with codecs.open(sparkCsvFilePath, "r", "utf-8") as f:
 
 outputDf = pd.DataFrame(outputRows)
 
-# outputDf.to_csv(outputPath, columns=["topic", "title", "time", "date", "id", "text"], index=False)
-outputDf.to_csv(outputPath, columns=["topic", "id", "time", "runtag"], index=False, sep="\t")
-
-
+if ( outputDf.shape[0] > 0 ):
+    # outputDf.to_csv(outputPath, columns=["topic", "title", "time", "date", "id", "text"], index=False)
+    outputDf.to_csv(outputPath, columns=["topic", "id", "time", "runtag"], index=False, sep="\t", header=False)
+else:
+    print "No tweets to output... :("
+    fhandle = open(outputPath, 'a')
+    fhandle.close()

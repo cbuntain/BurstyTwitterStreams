@@ -46,8 +46,11 @@ specCharRegex = re.compile(r"[^a-zA-Z0-9\\s]")
 
 outputRows = []
 tweetIds = set()
+filLen = 0
 with codecs.open(sparkCsvFilePath, "r", "utf-8") as f:
+    filLen = len(f.read())
 
+if ( filLen > 0 ):
     df = pd.read_csv(sparkCsvFilePath, header=None)
     for (id, row) in df.iterrows():
 
@@ -82,6 +85,9 @@ with codecs.open(sparkCsvFilePath, "r", "utf-8") as f:
                     else:
                         localTopicCountMap[thisTopicNum] += 1
 
+        # if ( len(localTopics) == 0 ):
+        #     print "Tweet [", tweetId, "] contains no topics..."
+
         for localTopic in localTopics:
             if ( localTopicCountMap[localTopic[0]] < minKeywordCount ):
                 continue
@@ -111,8 +117,14 @@ with codecs.open(sparkCsvFilePath, "r", "utf-8") as f:
 
 outputDf = pd.DataFrame(outputRows)
 
-# YYYYMMDD topic_id Q0 tweet_id rank score runtag
-# outputDf.to_csv(outputPath, columns=["topic", "title", "time", "date", "id", "text"], index=False)
-outputDf.to_csv(outputPath, columns=["date", "topic", "q0", "id", "rank", "score", "runtag"], index=False, sep="\t")
+# print outputDf.shape
 
+if ( outputDf.shape[0] > 0 ):
+    # YYYYMMDD topic_id Q0 tweet_id rank score runtag
+    # outputDf.to_csv(outputPath, columns=["topic", "title", "time", "date", "id", "text"], index=False)
+    outputDf.to_csv(outputPath, columns=["date", "topic", "q0", "id", "rank", "score", "runtag"], index=False, sep="\t", header=False)
 
+else:
+    print "No tweets to output... :("
+    fhandle = open(outputPath, 'a')
+    fhandle.close()
