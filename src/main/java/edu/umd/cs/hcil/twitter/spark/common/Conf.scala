@@ -25,6 +25,10 @@ class Conf(propsFilePath : String) extends Serializable {
   val maxHashtags : Integer  = prop.getProperty("MAX_HASHTAGS").toInt
   val minTokens : Integer  = prop.getProperty("MIN_TOKENS").toInt
   val maxUrls : Integer  = prop.getProperty("MAX_URLS").toInt
+
+  val queryExpansionMatchThreshold : Double = prop.getProperty("MATCH_THRESHOLD", "0.2").toDouble
+  val queryExpMinTokenSize : Int = prop.getProperty("MIN_TOKEN_LENGTH", "3").toInt
+
 //
 //  def MINOR_WINDOW_SIZE = 2
 //  def MAJOR_WINDOW_SIZE = 30 // Used 30 minutes here for TREC2015

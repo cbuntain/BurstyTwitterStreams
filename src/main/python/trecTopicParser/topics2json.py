@@ -3,6 +3,7 @@
 from trec import Topics
 import sys
 import json
+import string
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 
@@ -27,14 +28,18 @@ for topic in topics.items():
     topicMap = topic[1]
 
     topicString = topicMap["title"].lower()
-    topicTokens = topicString.split(" ")
+    topicTokens = [w.strip(string.punctuation) for w in topicString.split(" ")]
 
     newTokens = []
     for token in topicTokens:
         if token not in enStops:
+
+            if ( len(token) > 2 ):
+                newTokens.append(token)
+
             lemmatizedToken = wnl.lemmatize(token)
 
-            if ( len(lemmatizedToken) > 2 ):
+            if ( lemmatizedToken not in newTokens and len(lemmatizedToken) > 2 ):
                 newTokens.append(lemmatizedToken)
 
     newTopicMap = {
