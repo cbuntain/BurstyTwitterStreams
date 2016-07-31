@@ -28,6 +28,14 @@ class Conf(propsFilePath : String) extends Serializable {
 
   val queryExpansionMatchThreshold : Double = prop.getProperty("MATCH_THRESHOLD", "0.2").toDouble
   val queryExpMinTokenSize : Int = prop.getProperty("MIN_TOKEN_LENGTH", "3").toInt
+  val queryExpMinTweetCount : Int = prop.getProperty("MIN_TWEET_COUNT", "100").toInt
+  val queryExpMinHashtagCount : Int = prop.getProperty("MIN_HASHTAG_COUNT", "20").toInt
+
+  val maxRelevantTweets : Int = prop.getProperty("MAX_RELEVANT_TWEETS", "1000").toInt
+  val queryExpTokenTakeCount : Int = prop.getProperty("MAX_TAKEN_TOKENS", "10").toInt
+  val queryExpHashtagTakeCount : Int = prop.getProperty("MAX_TAKEN_TAGS", "3").toInt
+
+  val makeBigrams : Boolean = prop.getProperty("USE_BIGRAMS", "False").toBoolean
 
 //
 //  def MINOR_WINDOW_SIZE = 2

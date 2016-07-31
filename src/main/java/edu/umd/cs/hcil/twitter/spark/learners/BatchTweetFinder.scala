@@ -11,8 +11,7 @@ import java.util.Date
 
 import scala.io.Source
 import edu.umd.cs.hcil.twitter.spark.common.{Conf, ScoreGenerator}
-import edu.umd.cs.hcil.twitter.spark.utils.DateUtils
-import edu.umd.cs.twitter.tokenizer.TweetTokenizer
+import edu.umd.cs.hcil.twitter.spark.utils.{DateUtils, StatusTokenizer}
 import org.apache.commons.csv.{CSVFormat, CSVPrinter}
 import org.apache.spark._
 import org.apache.spark.rdd.RDD
@@ -31,14 +30,6 @@ object BatchTweetFinder {
   // Record all tweets we tag
   var taggedTweets : Set[Long] = Set.empty
   var taggedTweetTokens : List[List[String]] = List.empty
-
-  // A wicked hack to perform expensive instantiation of the CoreNLP pipeline.
-  //  The transient annotation says to have a different coreNLP object in each
-  //  JVM, and the lazy tag tells the JVM to instantiate the object on first use
-  //  As a result, each node gets its own copy
-  object TransientTokenizer {
-    @transient lazy val tokenizer = new TweetTokenizer()
-  }
 
   /**
    * @param args the command line arguments
@@ -248,8 +239,7 @@ object BatchTweetFinder {
           val tweetText = status.getText
 
           try {
-            val tweet = TransientTokenizer.tokenizer.tokenizeTweet(tweetText)
-            val tokens = tweet.getTokens.asScala ++ status.getHashtagEntities.map(ht => ht.getText)
+            val tokens = StatusTokenizer.tokenize(status) ++ status.getHashtagEntities.map(ht => ht.getText)
             (status, tokens.map(str => str.toLowerCase).toList)
           } catch {
             case iae : IllegalArgumentException => {

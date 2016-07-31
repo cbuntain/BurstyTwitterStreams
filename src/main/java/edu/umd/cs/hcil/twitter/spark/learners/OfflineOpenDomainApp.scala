@@ -18,17 +18,9 @@ import org.json4s._
 import org.json4s.jackson.JsonMethods._
 import twitter4j.{Status, TwitterObjectFactory}
 
-import scala.collection.JavaConverters._
 import scala.util.control.Breaks._
 
-/*
- * Find bursty tweets in the 1% tweet stream. Then, only return those tweets
- * present in a seed set of tweets. We can then use this restricted set of
- * tweets to see if the burst analysis this code performs adds value to the
- * other scoring applications.
- */
-
-object OfflineGateApp {
+object OfflineOpenDomainApp {
 
   implicit val formats = DefaultFormats // Brings in default date formats etc.
   case class Topic(title: String, num: String, tokens: List[String])
@@ -42,36 +34,25 @@ object OfflineGateApp {
    */
   def main(args: Array[String]): Unit = {
 
-    val conf = new SparkConf().setAppName("TREC Gate Analyzer")
+    val conf = new SparkConf().setAppName("TREC Offline Analyzer")
     val sc = new SparkContext(conf)
 
     val propertiesPath = args(0)
-    val twitterDataPath = args(1)
-    val candidateTweetDataPath = args(2)
-    val topicsFile = args(3)
-    val outputFile = args(4)
+    val dataPath = args(1)
+    val outputFile = args(2)
 
     val burstConf = new Conf(propertiesPath)
 
-    val twitterMsgsRaw = sc.textFile(twitterDataPath)
+    val twitterMsgsRaw = sc.textFile(dataPath)
     println("Initial Partition Count: " + twitterMsgsRaw.partitions.size)
 
     var twitterMsgs = twitterMsgsRaw
-    if (args.size > 5) {
-      val initialPartitions = args(5).toInt
+    if (args.size > 3) {
+      val initialPartitions = args(3).toInt
       twitterMsgs = twitterMsgsRaw.repartition(initialPartitions)
       println("New Partition Count: " + twitterMsgs.partitions.size)
     }
     val newPartitionSize = twitterMsgs.partitions.size
-
-    val candidateTweets : Set[Long] = scala.io.Source.fromFile(candidateTweetDataPath).getLines.map(s => s.toLong).toSet
-
-    val topicsJsonStr = scala.io.Source.fromFile(topicsFile).mkString
-    val topicsJson = parse(topicsJsonStr)
-    val topicList = topicsJson.extract[List[Topic]]
-    val topicKeywordSet: Set[String] = topicList.flatMap(topic => topic.tokens).toSet
-
-    val broad_topicKeywordSet = sc.broadcast(topicKeywordSet)
 
     // If we are going to use the direct twitter stream, use TwitterUtils. Else, use socket.
     val twitterStream = twitterMsgs.map(line => {
@@ -82,32 +63,18 @@ object OfflineGateApp {
       }
     })
 
-    // Remove tweets not in English (we discard other filters here
-    //  since we rely on the other systems to select good tweets)
+    // Remove tweets not in English and other filters
     val noRetweetStream = twitterStream
       .filter(status => {
       status != null &&
-        status.getLang.compareToIgnoreCase("en") == 0
+        status.getLang.compareToIgnoreCase("en") == 0 &&
+        !status.getText.toLowerCase.contains("follow") &&
+        status.getHashtagEntities.size <= burstConf.maxHashtags &&
+        status.getURLEntities.size <= burstConf.maxUrls
     })
 
     // Only keep tweets that contain a topic token
-    val topicalTweetStream = noRetweetStream.filter(status => {
-
-      val localTopicSet = broad_topicKeywordSet.value
-      val lowercaseTweet = status.getText.toLowerCase
-      val topicIt = localTopicSet.iterator
-      var topicalFlag = false
-
-      while (topicIt.hasNext && topicalFlag == false) {
-        val topicToken = topicIt.next()
-
-        if (lowercaseTweet.contains(topicToken)) {
-          topicalFlag = true
-        }
-      }
-
-      topicalFlag
-    })
+    val topicalTweetStream = noRetweetStream
 
     // Create a (time, status) pair from each tweet, replicated MINOR_WINDOW_SIZE times
     val timedTopicalTweetStream = topicalTweetStream.flatMap(status => {
@@ -182,14 +149,11 @@ object OfflineGateApp {
       // Create pairs of statuses and tokens in those statuses
       val tweetTokenPairs = thisDatesRdd.map(tuple => {
         val status = tuple._2
-        var tokens : List[String] = List.empty
-        try {
-          tokens = StatusTokenizer.tokenize(status) ++ status.getHashtagEntities.map(ht => ht.getText)
-        } catch {
-          case e : Exception => println("Tokenization failed on tweet: " + status.getText)
-        }
-        (status, tokens.map(str => str.toLowerCase))
+        val tokens = StatusTokenizer.tokenize(status) ++ status.getHashtagEntities.map(ht => ht.getText)
+
+        (status, tokens.map(str => str.toLowerCase).toList)
       }).filter(tuple => tuple._2.size >= burstConf.minTokens)
+
       tweetTokenPairs.persist()
       tweetRddList = tweetRddList :+ tweetTokenPairs
 
@@ -221,19 +185,24 @@ object OfflineGateApp {
       })
 
       val scores: RDD[Tuple2[String, Double]] = ScoreGenerator.scoreFrequencyArray(combinedRddPre, dateList)
+      val sortedScores = scores.sortBy(tuple => tuple._2, false)
+
+      val topList = sortedScores.take(20)
+      println("\nPopular topics, Now: %s, Window: %s".format(new Date().toString, dateList.last.toString))
+      topList.foreach { case (tag, score) => println("%s - %f".format(tag, score)) }
 
       // Bursty keywords to look for in tweets
       var burstingKeywords : List[String] = List.empty
 
       // Only look for bursty tokens if we're beyond the major window size
       if (rddCount >= burstConf.majorWindowSize) {
-        val targetKeywords = scores
+        val targetKeywords = sortedScores
           .filter(tuple => tuple._1.length > 3)
           .filter(tuple => tuple._2 > burstConf.burstThreshold)
           .map(tuple => tuple._1).collect
 
         println("Over threshold count: " + targetKeywords.size)
-        val topTokens: List[String] = targetKeywords.toList
+        val topTokens: List[String] = targetKeywords.take(10).toList
 
         burstingKeywords = burstingKeywords ++ topTokens
         println("Bursting Keywords count: " + burstingKeywords.size)
@@ -241,7 +210,7 @@ object OfflineGateApp {
 
       // Find the best tweets containing the top tokens and write to output file
       val outputFileWriter = new FileWriter(outputFile, true)
-      val logEntries = findGoodTweets(time, burstingKeywords, tweetRddList, candidateTweets, burstConf)
+      val logEntries = findGoodTweets(time, burstingKeywords, tweetRddList, burstConf)
       logEntries.foreach(logEntry => outputFileWriter.write(logEntry))
       outputFileWriter.close()
 
@@ -267,21 +236,33 @@ object OfflineGateApp {
 
   }
 
+  def createCsvString(topic : String, time : Date, tweetId : Long, text : String) : String = {
+    val buff = new StringBuffer()
+    val writer = new CSVPrinter(buff, CSVFormat.DEFAULT)
+
+    writer.print(topic)
+    writer.print(time.getTime / 1000)
+    writer.print(tweetId)
+    writer.print(text.replace("\n", " "))
+
+    buff.toString + "\n"
+  }
+
   def findGoodTweets(
                       time : Date,
                       targetTokens : List[String],
                       tweetRddList: List[RDD[(Status, List[String])]],
-                      candidateTweets : Set[Long],
                       burstConf : Conf) : List[String] = {
 
     println("Status RDD Time: " + time)
+
+    var logEntries : List[String] = List.empty
+    var capturedTweets: Map[Status, Int] = Map.empty
 
     println("Bursting Keyword Count: " + targetTokens.size)
     println("Finding tweets containing: %s".format(targetTokens))
 
     val rdd = tweetRddList.reduce((l, r) => l ++ r)
-
-    // Find tweets containing the given bursty tokens
     val targetTweets = rdd.filter(tuple => {
       val status = tuple._1
       var flag = false
@@ -292,15 +273,54 @@ object OfflineGateApp {
         }
       }
       flag
-    }).map(tuple => {
-      tuple._1.getId
-    }).collect().toSet
+    }).collect().toMap
 
-    // Find all tweets that contain bursty tokens, have not been previously tagged, and exist in the candidate tweet set
-    val gatedTweets = targetTweets.diff(taggedTweets).intersect(candidateTweets)
-    taggedTweets = taggedTweets ++ gatedTweets
+    for (tweet <- targetTweets.keys) {
+      capturedTweets = capturedTweets ++ Map(tweet -> (capturedTweets.getOrElse(tweet, 0) + 1))
+    }
 
-    val logEntries : List[String] = gatedTweets.toList.map(l => s"$l\n")
+    val topMatches: List[Status] = capturedTweets
+      .filter(tuple => tuple._2 == capturedTweets.values.max)
+      .map(tuple => tuple._1)
+      .toList
+      .sortBy(status => status.getCreatedAt)
+      .reverse
+
+    val leastSimilarTweets : List[(Double, Status)] = topMatches
+      .filter(tweet => taggedTweets.contains(tweet.getId) == false)
+      .map(tweet => {
+        val tweetTokens = targetTweets(tweet).toList
+
+        // Compute Jaccard similarity
+        var jaccardSim = 0.0
+        for ( tokenSet <- taggedTweetTokens ) {
+          val intersectionSize = tokenSet.intersect(tweetTokens).distinct.size
+          val unionSize = (tokenSet ++ tweetTokens).distinct.size
+
+          val localJaccardSim = intersectionSize.toDouble / unionSize.toDouble
+
+          jaccardSim = Math.max(localJaccardSim, jaccardSim)
+        }
+
+        taggedTweets = taggedTweets + tweet.getId
+        taggedTweetTokens = taggedTweetTokens :+ tweetTokens
+
+        (jaccardSim, tweet)
+      })
+      .filter(tuple => tuple._1 <= burstConf.similarityThreshold)
+      .sortBy(tuple => tuple._1)
+      .reverse
+      .take(burstConf.perMinuteMax)
+
+    leastSimilarTweets.map(tuple => {
+      val tweet = tuple._2
+
+      val logEntry: String = createCsvString("OPEN_DOMAIN", time, tweet.getId, tweet.getText)
+
+      print(logEntry)
+
+      logEntries = logEntries :+ logEntry
+    })
 
     return logEntries
   }

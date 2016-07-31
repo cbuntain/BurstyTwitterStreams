@@ -10,14 +10,13 @@ import java.io.FileWriter
 import java.util.Date
 
 import edu.umd.cs.hcil.twitter.spark.common.{Conf, ScoreGenerator}
-import edu.umd.cs.hcil.twitter.spark.utils.DateUtils
-import edu.umd.cs.twitter.tokenizer.TweetTokenizer
+import edu.umd.cs.hcil.twitter.spark.utils.{DateUtils, StatusTokenizer}
 import org.apache.commons.csv.{CSVFormat, CSVPrinter}
 import org.apache.spark._
 import org.apache.spark.rdd.RDD
 import org.json4s._
 import org.json4s.jackson.JsonMethods._
-import twitter4j.{Status, TwitterObjectFactory, TwitterException}
+import twitter4j.{Status, TwitterException, TwitterObjectFactory}
 
 import scala.collection.JavaConverters._
 import scala.util.control.Breaks._
@@ -175,11 +174,11 @@ object OfflineApp {
       // Create pairs of statuses and tokens in those statuses
       val tweetTokenPairs = thisDatesRdd.map(tuple => {
         val status = tuple._2
-        val tokenizer = new TweetTokenizer
-        val tweet = tokenizer.tokenizeTweet(status.getText)
-        val tokens = tweet.getTokens.asScala ++ status.getHashtagEntities.map(ht => ht.getText)
+        val tokens = StatusTokenizer.tokenize(status) ++ status.getHashtagEntities.map(ht => ht.getText)
+
         (status, tokens.map(str => str.toLowerCase).toList)
       }).filter(tuple => tuple._2.size >= burstConf.minTokens)
+
       tweetTokenPairs.persist()
       tweetRddList = tweetRddList :+ tweetTokenPairs
 

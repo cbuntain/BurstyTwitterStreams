@@ -8,12 +8,13 @@ package edu.umd.cs.hcil.twitter.spark.stream
 
 import java.io.FileWriter
 import java.text.SimpleDateFormat
+
 import scala.util.control.Breaks._
-import edu.umd.cs.twitter.tokenizer.TweetTokenizer
 import org.apache.commons.csv.{CSVFormat, CSVPrinter}
 import twitter4j.Status
 import twitter4j.json.DataObjectFactory
-import java.util.{Locale, Calendar, Date}
+import java.util.{Calendar, Date, Locale}
+
 import scala.collection.JavaConverters._
 import org.apache.spark._
 import org.apache.spark.SparkContext._
@@ -24,6 +25,8 @@ import org.apache.commons.math3.linear.ArrayRealVector
 import edu.umd.cs.hcil.twitter.spark.common.Conf
 import edu.umd.cs.hcil.twitter.spark.common.ScoreGenerator
 import edu.umd.cs.hcil.twitter.spark.scorers.RegressionScorer
+import edu.umd.cs.hcil.twitter.spark.utils.StatusTokenizer
+
 import scala.collection.immutable.Queue
 import scala.collection.mutable
 import org.json4s._
@@ -31,9 +34,10 @@ import org.json4s.jackson.JsonMethods._
 import twitter4j.Status
 import twitter4j.TwitterObjectFactory
 import edu.umd.cs.hcil.twitter.streamer.TwitterUtils
+
 import scala.concurrent._
 import ExecutionContext.Implicits.global
-import scala.util.{Success, Failure}
+import scala.util.{Failure, Success}
 
 object App {
 
@@ -112,9 +116,7 @@ object App {
     // Create pairs of statuses and tokens in those statuses
     val tweetTokenPairs = topicalTweetStream
       .map(status => {
-          val tokenizer = new TweetTokenizer
-          val tweet = tokenizer.tokenizeTweet(status.getText)
-          val tokens = tweet.getTokens.asScala ++ status.getHashtagEntities.map(ht => ht.getText)
+          val tokens = StatusTokenizer.tokenize(status) ++ status.getHashtagEntities.map(ht => ht.getText)
           (status, tokens.map(str => str.toLowerCase))
         }).filter(tuple => tuple._2.size >= burstConf.minTokens)
 

@@ -1,7 +1,9 @@
 package edu.umd.cs.hcil.twitter.spark.preparation
 
-import org.apache.lucene.analysis.core.SimpleAnalyzer
+import org.apache.lucene.analysis.core.{StopAnalyzer, SimpleAnalyzer}
+import org.apache.lucene.analysis.standard.StandardAnalyzer
 import org.apache.lucene.index.memory.MemoryIndex
+import org.apache.lucene.queryparser.flexible.standard.StandardQueryParser
 import org.apache.lucene.queryparser.simple.SimpleQueryParser
 
 import java.io.FileWriter
@@ -12,7 +14,6 @@ import java.util.Date
 
 import edu.umd.cs.hcil.twitter.spark.common.{Conf, ScoreGenerator}
 import edu.umd.cs.hcil.twitter.spark.utils.DateUtils
-import edu.umd.cs.twitter.tokenizer.TweetTokenizer
 import org.apache.commons.csv.{CSVFormat, CSVPrinter}
 import org.apache.spark._
 import org.apache.spark.mllib.feature.Word2Vec
@@ -22,6 +23,7 @@ import org.apache.spark.streaming.{Seconds, StreamingContext}
 import org.json4s._
 import org.json4s.jackson.JsonMethods._
 import twitter4j.{Status, TwitterObjectFactory, TwitterException}
+import edu.umd.cs.hcil.twitter.spark.utils.StatusTokenizer
 
 import scala.collection.JavaConverters._
 import scala.util.control.Breaks._
@@ -51,6 +53,8 @@ object QueryExpander {
 
     val burstConf = new Conf(propertiesPath)
 
+    val stopWords = StopAnalyzer.ENGLISH_STOP_WORDS_SET
+
     val twitterMsgsRaw = sc.textFile(inputData)
     println("Initial Partition Count: " + twitterMsgsRaw.partitions.size)
 
@@ -73,25 +77,40 @@ object QueryExpander {
         case e : Exception => null
       }
     }).filter(status => status != null)
+//      .filter(status => status.getLang == "en")
 
-    val tweetTextTuples = tweets.map(status =>
+    val tweetTextTuples = tweets.map(status => {
+      val tokens : List[String] = if ( burstConf.makeBigrams ) {
+        buildBigrams(StatusTokenizer.tokenize(status)).filter(token => {
+          token.length >= burstConf.queryExpMinTokenSize
+        })
+      } else {
+        StatusTokenizer.tokenize(status).filter(token => {
+          token.length >= burstConf.queryExpMinTokenSize
+        })
+      }
+
       (status.getId,
         status.getText,
-        tokenize(status.getText.toLowerCase).filter(token => {
-          token.length >= burstConf.queryExpMinTokenSize
-        }),
-        status.getHashtagEntities.map(entity => entity.getText.toLowerCase)))
+        tokens.map(token => token.toLowerCase),
+        status.getHashtagEntities.map(entity => entity.getText.toLowerCase))
+    })
 
     val topicsJsonStr = scala.io.Source.fromFile(topicsFile).mkString
     val topicsJson = parse(topicsJsonStr)
     val topicList = topicsJson.extract[List[Topic]]
 
+    println("Searching for:")
+    for (topic <- topicList) {
+      println(topic.title)
+    }
+
     tweetTextTuples.cache()
 
     // Build the background model from all tweets
     val bgModelCounts : RDD[(String, Int)] = tweetTextTuples.flatMap(tuple => {
-        tuple._3.map(token => (token, 1))
-      }).reduceByKey((l, r) => l + r)
+      tuple._3.map(token => (token, 1))
+    }).reduceByKey((l, r) => l + r)
     val bgModelTotal = bgModelCounts.map(tuple => tuple._2).reduce((l, r) => l + r)
     val logTotal = math.log(bgModelTotal)
     val bgModel = bgModelCounts.mapValues(count => math.log(count) - logTotal).collect().toMap
@@ -101,13 +120,13 @@ object QueryExpander {
 
     // Build the foregound model for each topic
     for ( topic <- topicList ) {
-      val strippedTitle = topic.title.replace("\"", "")
+      val strippedTitle = topic.title
 
       // Pseudo-Relevance feedback
       val scoredPairs = tweetTextTuples.mapPartitions(iter => {
         // Construct an analyzer for our tweet text
-        val analyzer = new SimpleAnalyzer()
-        val parser = new SimpleQueryParser(analyzer, "content")
+        val analyzer = new StandardAnalyzer()
+        val parser = new StandardQueryParser()
 
         iter.map(pair => {
           val id = pair._1
@@ -120,11 +139,19 @@ object QueryExpander {
 
           idx.addField("content", text.toLowerCase(), analyzer)
 
-          val score = idx.search(parser.parse(strippedTitle))
+          val score = idx.search(parser.parse(strippedTitle, "content"))
 
           (id, text, tokens, hashtags, score)
         })
       }).filter(tuple => tuple._5 > burstConf.queryExpansionMatchThreshold)
+
+      val scoreList = scoredPairs.map(tuple => tuple._5).collect.sorted.reverse
+      val topScoredPairs = if ( scoreList.length < burstConf.maxRelevantTweets ) {
+        scoredPairs
+      } else {
+        val minScore = scoreList(burstConf.maxRelevantTweets-1)
+        scoredPairs.filter(tuple => tuple._5 >= minScore)
+      }
 
 //      val collectedMatches = scoredPairs.collect().sortBy(tuple => tuple._3).reverse
 //
@@ -134,7 +161,7 @@ object QueryExpander {
 //      }
 
       val matchCount = scoredPairs.count()
-      if ( matchCount < 10 ) {
+      if ( matchCount < burstConf.queryExpMinTweetCount ) {
         println("Not enough tweets found for: " + topic.title + ", " + matchCount)
 
         // Add the original topic back in
@@ -143,31 +170,12 @@ object QueryExpander {
         println("For topic [" + topic.title + "], tweet count: " + matchCount)
 
         // Now build word2vec model from collected tweets, so we can extract synonyms
-        val tokenizedTweets: RDD[(String, Int)] = scoredPairs.flatMap(tuple => {
-          tuple._3.filter(s => s.length > 3).map(token => (token, 1))
+        val tokenizedTweets: RDD[(String, Int)] = topScoredPairs.flatMap(tuple => {
+          tuple._3.filter(token => token.length >= burstConf.queryExpMinTokenSize).map(token => (token, 1))
         }).reduceByKey((l, r) => l + r)
         val foreModelTotal = tokenizedTweets.map(tuple => tuple._2).reduce((l, r) => l + r)
         val logForeTotal = math.log(foreModelTotal)
         val foreModel = tokenizedTweets.mapValues(count => math.log(count) - logForeTotal).collect()
-
-//        val w2v = new Word2Vec
-//        w2v.setMinCount(50)
-//        w2v.setNumPartitions(1)
-//        w2v.setVectorSize(100)
-//        val model: Word2VecModel = w2v.fit(tokenizedTweets)
-//
-//        for (keyword <- topic.tokens) {
-//          try {
-//            val syns = model.findSynonyms(keyword, 5)
-//
-//            println("Synonyms for [" + keyword + "]:")
-//            for (pair <- syns) {
-//              println("\t" + pair._1 + "->" + pair._2)
-//            }
-//          } catch {
-//            case e : Exception => println("Failed to find syn for keyword: " + keyword)
-//          }
-//        }
 
         val topTokens = foreModel.map(tuple => {
           val token = tuple._1
@@ -177,7 +185,7 @@ object QueryExpander {
           val gain = fgProb * math.log(fgProb / bgProb)
 
           (token, gain)
-        }).sortBy(tuple => tuple._2).reverse.take(10)
+        }).sortBy(tuple => tuple._2).reverse.take(burstConf.queryExpTokenTakeCount)
 
         println("Top keywords for: " + topic.title)
         for ( pair <- topTokens ) {
@@ -186,9 +194,9 @@ object QueryExpander {
 
         val topHashtags = scoredPairs.flatMap(tuple => tuple._4.map(hashtag => (hashtag, 1)))
           .reduceByKey((l, r) => l + r)
-          .filter(tuple => tuple._2 > 1)
+          .filter(tuple => tuple._2 > burstConf.queryExpMinHashtagCount)
           .sortBy(tuple => tuple._2, false)
-          .take(5)
+          .take(burstConf.queryExpHashtagTakeCount)
 
         println("Top Hashtags for: " + topic.title)
         for ( pair <- topHashtags ) {
@@ -199,6 +207,7 @@ object QueryExpander {
         val newTokenList : List[String] = topic.tokens ++
           topTokens.map(tuple => tuple._1) ++
           topHashtags.map(tuple => '#' + tuple._1)
+        .filter(token => !stopWords.contains(token))
 
         val newTopic = Topic(topic.title, topic.num, newTokenList.distinct)
         newTopicList = newTopicList :+ newTopic
@@ -214,9 +223,11 @@ object QueryExpander {
     bw.close()
   }
 
-  // Split a piece of text into individual words.
-  def tokenize(text : String) : Array[String] = {
-    // Lowercase each word and remove punctuation.
-    text.toLowerCase.replaceAll("[^a-zA-Z0-9\\s]", "").split("\\s+")
+  def buildBigrams(tokenList : List[String]) : List[String] = {
+    return if ( tokenList.size > 1 ) {
+      tokenList ++ tokenList.sliding(2).toList.map(x => x(0) + " " + x(1))
+    } else {
+      tokenList
+    }
   }
 }
