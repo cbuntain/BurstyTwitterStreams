@@ -21,6 +21,7 @@ import org.apache.spark.SparkContext._
 import org.apache.spark.rdd.RDD
 import org.apache.spark.streaming._
 import org.apache.spark.streaming.StreamingContext._
+import org.apache.spark.streaming.dstream.DStream
 import org.apache.commons.math3.linear.ArrayRealVector
 import edu.umd.cs.hcil.twitter.spark.common.Conf
 import edu.umd.cs.hcil.twitter.spark.common.ScoreGenerator
@@ -34,15 +35,27 @@ import org.json4s.jackson.JsonMethods._
 import twitter4j.Status
 import twitter4j.TwitterObjectFactory
 import edu.umd.cs.hcil.twitter.streamer.TwitterUtils
+import org.apache.lucene.analysis.standard.StandardAnalyzer
+import org.apache.lucene.index.memory.MemoryIndex
+import org.apache.lucene.queryparser.flexible.standard.StandardQueryParser
 
 import scala.concurrent._
 import ExecutionContext.Implicits.global
 import scala.util.{Failure, Success}
 
+import play.api.libs.ws.ning.NingWSClient
+
 object App {
 
   implicit val formats = DefaultFormats // Brings in default date formats etc.
-  case class Topic(title: String, num: String, tokens: List[String])
+  case class Topic(title: String, topid: String, description: String, narrative: String)
+
+  // Construct an analyzer for our tweet text
+  val localAnalyzer = new StandardAnalyzer()
+  val localParser = new StandardQueryParser()
+
+  // HTTP Client
+  val wsClient = NingWSClient()
 
   /**
    * @param args the command line arguments
@@ -68,12 +81,10 @@ object App {
     val topicsJsonStr = scala.io.Source.fromFile(topicsFile).mkString
     val topicsJson = parse(topicsJsonStr)
     val topicList = topicsJson.extract[List[Topic]]
-    val topicKeywordSet : Set[String] = topicList.flatMap(topic => topic.tokens).toSet
-
-    val broad_topicKeywordSet = sc.broadcast(topicKeywordSet)
+    val topicTitleList = topicList.map(topic => topic.title.toLowerCase)
 
     // If true, we use a socket. If false, we use the direct Twitter stream
-    val replayOldStream = true
+    val replayOldStream = false
 
     // If we are going to use the direct twitter stream, use TwitterUtils. Else, use socket.
     val twitterStream = if ( replayOldStream == false ) {
@@ -88,6 +99,8 @@ object App {
     // Remove tweets not in English and other filters
     val noRetweetStream = twitterStream
       .filter(status => {
+        status != null &&
+        status.getLang != null &&
         status.getLang.compareToIgnoreCase("en") == 0 &&
         !status.getText.toLowerCase.contains("follow") &&
         status.getHashtagEntities.size <= burstConf.maxHashtags &&
@@ -95,23 +108,7 @@ object App {
     })
 
     // Only keep tweets that contain a topic token
-    val topicalTweetStream = noRetweetStream.filter(status => {
-
-      val localTopicSet = broad_topicKeywordSet.value
-      val lowercaseTweet = status.getText.toLowerCase
-      val topicIt = localTopicSet.iterator
-      var topicalFlag = false
-
-      while ( topicIt.hasNext && topicalFlag == false ) {
-        val topicToken = topicIt.next()
-
-        if ( lowercaseTweet.contains(topicToken) ) {
-          topicalFlag = true
-        }
-      }
-
-      topicalFlag
-    })
+    val topicalTweetStream = querier(topicTitleList, noRetweetStream, 0.0d)
 
     // Create pairs of statuses and tokens in those statuses
     val tweetTokenPairs = topicalTweetStream
@@ -250,12 +247,11 @@ object App {
           .map(tuple => tuple._1)
           .toList
           .sortBy(status => status.getCreatedAt)
-          .reverse
 
         val leastSimilarTweets : List[(Double, Status)] = topMatches
           .filter(tweet => taggedTweets.contains(tweet.getId) == false)
           .map(tweet => {
-            val tweetTokens = targetTweets(tweet).toList
+            val tweetTokens = targetTweets(tweet)
 
             // Compute Jaccard similarity
             var jaccardSim = 0.0
@@ -278,24 +274,29 @@ object App {
           .reverse
           .take(burstConf.perMinuteMax)
 
+        // Match tweets to topics
         leastSimilarTweets.map(tuple => {
           val tweet = tuple._2
-          val tweetTokens = targetTweets(tweet).toList
-
           val lowerTweetText = tweet.getText.toLowerCase
-          var topicIds = ""
+
+          // Construct an in-memory index for the tweet data
+          val idx = new MemoryIndex()
+          idx.addField("content", lowerTweetText, localAnalyzer)
+
+          var topicIds = List[String]()
+
           for (topic <- topicList) {
-            breakable {
-              for (token <- topic.tokens) {
-                if (lowerTweetText.contains(token)) {
-                  topicIds += topic.num + "+"
-                  break
-                }
-              }
+            if ( idx.search(localParser.parse(topic.title.toLowerCase, "content")) > 0 ) {
+              topicIds = topicIds :+ topic.topid
+
+              // Submit tweet-topic to broker
+              submitTweet(tweet, topic.topid, burstConf, wsClient)
             }
           }
 
-          val logEntry: String = createCsvString(topicIds, time, tweet.getId, tweet.getText)
+          val topicString = topicIds.reduce((l, r) => l + "+" + r)
+
+          val logEntry: String = createCsvString(topicString, time, tweet.getId, tweet.getText)
 
           print(logEntry)
           outputFileWriter.write(logEntry)
@@ -334,4 +335,50 @@ object App {
     buff.toString + "\n"
   }
 
+  def querier(queries : List[String], statusList : DStream[Status], threshold : Double) : DStream[Status] = {
+    // Pseudo-Relevance feedback
+    val scoredPairs = statusList.mapPartitions(iter => {
+      // Construct an analyzer for our tweet text
+      val analyzer = new StandardAnalyzer()
+      val parser = new StandardQueryParser()
+
+      // Use AND
+      parser.setDefaultOperator(org.apache.lucene.queryparser.flexible.standard.config.StandardQueryConfigHandler.Operator.AND)
+
+      iter.map(status => {
+        val text = status.getText
+
+        // Construct an in-memory index for the tweet data
+        val idx = new MemoryIndex()
+
+        idx.addField("content", text.toLowerCase(), analyzer)
+
+        var score = 0.0d
+        for ( q <- queries ) {
+          score = score + idx.search(parser.parse(q, "content"))
+        }
+
+        (status, score)
+      })
+    }).filter(tuple => tuple._2 > threshold)
+      .map(tuple => tuple._1)
+
+    return scoredPairs
+  }
+
+  def submitTweet(tweet : Status, topic : String, conf : Conf, wsClient : NingWSClient) : Unit = {
+
+    // POST /tweet/:topid/:tweetid/:clientid
+    val submitUrl = "%s/tweet/%s/%s/%s".format(conf.brokerUrl, topic, tweet.getId.toString, conf.clientId)
+
+    wsClient
+      .url(submitUrl)
+      .execute("POST")
+      .map( { wsResponse =>
+        println(s"Submitted: ${submitUrl}")
+        println(s"Status: ${wsResponse.status}")
+        println(s"Body: ${wsResponse.body}")
+      })
+
+  }
 }

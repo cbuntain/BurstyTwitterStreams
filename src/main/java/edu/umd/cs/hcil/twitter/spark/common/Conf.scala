@@ -37,6 +37,9 @@ class Conf(propsFilePath : String) extends Serializable {
 
   val makeBigrams : Boolean = prop.getProperty("USE_BIGRAMS", "False").toBoolean
 
+  val brokerUrl : String = prop.getProperty("BROKER_URL", "localhost:8080")
+  val clientId : String = prop.getProperty("CLIENT_ID", "tC6WXoIlnW8a")
+
 //
 //  def MINOR_WINDOW_SIZE = 2
 //  def MAJOR_WINDOW_SIZE = 30 // Used 30 minutes here for TREC2015
