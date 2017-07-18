@@ -7,37 +7,31 @@
 package edu.umd.cs.hcil.twitter.spark.stream
 
 import java.io.FileWriter
-import java.text.SimpleDateFormat
-
-import scala.util.control.Breaks._
 import org.apache.commons.csv.{CSVFormat, CSVPrinter}
 import twitter4j.Status
-import twitter4j.json.DataObjectFactory
-import java.util.{Calendar, Date, Locale}
+import java.util.{Calendar, Date}
 
-import scala.collection.JavaConverters._
 import org.apache.spark._
-import org.apache.spark.SparkContext._
 import org.apache.spark.rdd.RDD
 import org.apache.spark.streaming._
-import org.apache.spark.streaming.StreamingContext._
 import org.apache.spark.streaming.dstream.DStream
-import org.apache.commons.math3.linear.ArrayRealVector
 import edu.umd.cs.hcil.twitter.spark.common.Conf
 import edu.umd.cs.hcil.twitter.spark.common.ScoreGenerator
-import edu.umd.cs.hcil.twitter.spark.scorers.RegressionScorer
 import edu.umd.cs.hcil.twitter.spark.utils.StatusTokenizer
 
 import scala.collection.immutable.Queue
-import scala.collection.mutable
 import org.json4s._
 import org.json4s.jackson.JsonMethods._
 import twitter4j.Status
 import twitter4j.TwitterObjectFactory
-import edu.umd.cs.hcil.twitter.streamer.TwitterUtils
+import org.apache.spark.streaming.twitter._
 import org.apache.lucene.analysis.standard.StandardAnalyzer
 import org.apache.lucene.index.memory.MemoryIndex
 import org.apache.lucene.queryparser.flexible.standard.StandardQueryParser
+import org.apache.lucene.queryparser.flexible.standard.config.StandardQueryConfigHandler
+
+import scala.collection.mutable.ListBuffer
+import scala.collection.mutable.HashMap
 
 import scala.concurrent._
 import ExecutionContext.Implicits.global
@@ -49,6 +43,7 @@ object App {
 
   implicit val formats = DefaultFormats // Brings in default date formats etc.
   case class Topic(title: String, topid: String, description: String, narrative: String)
+  case class TokenizedStatus(status : Status, tokens : List[String])
 
   // Construct an analyzer for our tweet text
   val localAnalyzer = new StandardAnalyzer()
@@ -56,6 +51,15 @@ object App {
 
   // HTTP Client
   val wsClient = NingWSClient()
+
+  // Configuration object
+  var TrecBurstConf : Conf = null
+
+  // Track queues for each topic
+  val perTopicBurstThresholds : HashMap[String,Double] = HashMap.empty
+  val perTopicBurstQueue : HashMap[String, Queue[String]] = HashMap.empty
+  val perTopicRdds : HashMap[String, ListBuffer[RDD[(String, Map[Date, Int])]]] = HashMap.empty
+  val perTopicTaggedTweets : HashMap[String, List[App.TokenizedStatus]] = HashMap.empty
 
   /**
    * @param args the command line arguments
@@ -71,9 +75,10 @@ object App {
     val topicsFile = args(1)
     val outputFile = args(2)
 
-    val burstConf = new Conf(propertiesPath)
+    TrecBurstConf = new Conf(propertiesPath)
+    val broad_BurstConf = sc.broadcast(TrecBurstConf)
 
-    var numTasks = 8
+    var numTasks = 16
     if ( args.size > 3 ) {
       numTasks = args(3).toInt
     }
@@ -81,7 +86,14 @@ object App {
     val topicsJsonStr = scala.io.Source.fromFile(topicsFile).mkString
     val topicsJson = parse(topicsJsonStr)
     val topicList = topicsJson.extract[List[Topic]]
-    val topicTitleList = topicList.map(topic => topic.title.toLowerCase)
+
+    // Populate the per-topic maps, so we can track RDDs and bursts per topic
+    for ( topic <- topicList ) {
+      perTopicBurstThresholds(topic.topid) = TrecBurstConf.burstThreshold
+      perTopicBurstQueue(topic.topid) = Queue.empty
+      perTopicRdds(topic.topid) = ListBuffer.empty
+      perTopicTaggedTweets(topic.topid) = List.empty
+    }
 
     // If true, we use a socket. If false, we use the direct Twitter stream
     val replayOldStream = false
@@ -103,213 +115,93 @@ object App {
         status.getLang != null &&
         status.getLang.compareToIgnoreCase("en") == 0 &&
         !status.getText.toLowerCase.contains("follow") &&
-        status.getHashtagEntities.size <= burstConf.maxHashtags &&
-        status.getURLEntities.size <= burstConf.maxUrls
+          getHashtagCount(status) <= broad_BurstConf.value.maxHashtags &&
+          getUrlCount(status) <= broad_BurstConf.value.maxUrls
     })
 
-    // Only keep tweets that contain a topic token
-    val topicalTweetStream = querier(topicTitleList, noRetweetStream, 0.0d)
+    // For each topic, process the twitter stream accordingly
+    for ( topic <- topicList ) {
 
-    // Create pairs of statuses and tokens in those statuses
-    val tweetTokenPairs = topicalTweetStream
-      .map(status => {
+      // Only keep tweets that contain a topic token
+      val topicalTweetStream = querier(List(topic.title), noRetweetStream, TrecBurstConf.queryThreshold)
+
+      // Create pairs of statuses and tokens in those statuses
+      val tweetTokenPairs = topicalTweetStream
+        .map(status => {
           val tokens = StatusTokenizer.tokenize(status) ++ status.getHashtagEntities.map(ht => ht.getText)
           (status, tokens.map(str => str.toLowerCase))
-        }).filter(tuple => tuple._2.size >= burstConf.minTokens)
+        }).filter(tuple => tuple._2.size >= broad_BurstConf.value.minTokens)
 
-    // Convert (tweet, tokens) to (user_id, tokenSet) to (token, 1)
-    //  This conversion lets us count only one token per user
-    val userCounts = tweetTokenPairs
-      .map(pair => (pair._1.getUser.getId, pair._2.toSet))
-      .reduceByKey(_ ++ _)
-      .flatMap(pair => pair._2).map(token => (token, 1))
+      // Convert (tweet, tokens) to (user_id, tokenSet) to (token, 1)
+      //  This conversion lets us count only one token per user
+      val userCounts = tweetTokenPairs
+        .map(pair => (pair._1.getUser.getId, pair._2.toSet))
+        .reduceByKey(_ ++ _)
+        .flatMap(pair => pair._2)
+        .map(token => (token, 1))
 
-    val counts = userCounts
-    val windowSum = counts.reduceByKeyAndWindow(
-      (a:Int,b:Int) => (a + b), 
-      Seconds(burstConf.minorWindowSize * 60),
-      Seconds(60),
-      numTasks
-    )
+      val counts = userCounts
+      val windowSum = counts.reduceByKeyAndWindow(
+        (a: Int, b: Int) => (a + b),
+        Seconds(TrecBurstConf.minorWindowSize * 60),
+        Seconds(60),
+        numTasks
+      )
 
-    // Bursty keywords to look for in tweets
-    var burstingKeywords : Queue[String] = Queue.empty
-    
-    // Build a slider of the last ten minutes
-    var rddCount = 0
-    var dateList : List[Date] = List.empty
-    var rddList : List[RDD[Tuple2[String, Map[Date, Int]]]] = List.empty
-    windowSum.foreachRDD((rdd, time) => {
-        val dateTag = new Date(time.milliseconds)
-        dateList = dateList :+ dateTag
+      // Checkpoint the windowSum RDD
+      windowSum.checkpoint(Seconds(TrecBurstConf.majorWindowSize * 60))
 
-        println("Window Count: " + rddCount)
-        println("Dates so far: " + dateList)
+      // Build a slider of the last few minutes
+      var dateList: List[Date] = List.empty
+      windowSum.foreachRDD((rdd, time) => {
 
-        // Should be (token, Map[Date, Int])
-        val datedPairs = rdd.map(tuple => (tuple._1, Map(dateTag -> tuple._2)))
-        println("Date: " + dateTag.toString + ", Token Count: " + datedPairs.count())
-        datedPairs.persist
-        rddList = rddList :+ datedPairs
-        
-        val earliestDate = dateList(0)
-        println("Earliest Date: " + earliestDate)
-        
-        // Merge all the RDDs in our list, so we have a full set of tokens that occur in this window
-        val mergingRdd : RDD[Tuple2[String, Map[Date, Int]]] = rddList.reduce((rdd1, rdd2) => {
-            rdd1 ++ rdd2
-          })
+        // Use threading to avoid blocking on this topic
+        val burstFinderStatus = future {
+          dateList = dateList :+ new Date(time.milliseconds)
 
-        // Combine all the date maps for each token
-        val combinedRddPre : RDD[Tuple2[String, Map[Date, Int]]] = mergingRdd.reduceByKey((a, b) => {
-            a ++ b
-          })
+          // Call window processing code
+          findBurstsInWindow(topic.topid, rdd, time, dateList)
 
-        val scores : RDD[Tuple2[String, Double]] = ScoreGenerator.scoreFrequencyArray(combinedRddPre, dateList)
-        val sortedScores = scores.sortBy(tuple => tuple._2, false)
-
-        val topList = sortedScores.take(20)
-        println("\nPopular topics, Now: %s, Window: %s".format(new Date().toString, dateList.last.toString))
-        topList.foreach{case (tag, score) => println("%s - %f".format(tag, score))}
-
-        if ( rddCount >= burstConf.majorWindowSize ) {
-          val targetKeywords = sortedScores
-            .filter(tuple => tuple._1.length > 3)
-            .filter(tuple => tuple._2 > burstConf.burstThreshold)
-            .map(tuple => tuple._1).collect
-
-          println("Over threshold count: " + targetKeywords.size)
-          val topTokens : List[String] = targetKeywords.take(10).toList
-          burstingKeywords = burstingKeywords.enqueue(topTokens)
-          println("Bursting Keywords count: " + burstingKeywords.size)
-        }
-        
-        // Prune the date and rdd lists as needed
-        if ( dateList.size == burstConf.majorWindowSize ) {
-          
           // Drop the earliest date
-          dateList = dateList.slice(1, burstConf.majorWindowSize)
-          
-          // Drop the earliest RDD and unpersist it
-          val earliestRdd = rddList.head
-          rddList = rddList.slice(1, burstConf.majorWindowSize)
-          earliestRdd.unpersist(false)
+          if (dateList.size == TrecBurstConf.majorWindowSize) {
+            dateList = dateList.slice(1, TrecBurstConf.majorWindowSize)
+          }
         }
-        
-        rddCount += 1
+        burstFinderStatus.onComplete {
+          case Success(x) => println("Burst finder SUCCESS")
+          case Failure(ex) => println("Burst finder FAILURE: " + ex.getMessage)
+        }
+
+
       })
 
-    // Find tweets containing the bursty tokens
-    val tweetWindowStream = tweetTokenPairs
-      .window(
-        Seconds(burstConf.majorWindowSize * 60),
-        Seconds(60))
+      // Find tweets containing the bursty tokens
+      val tweetWindowStream = tweetTokenPairs
+        .window(
+          Seconds(TrecBurstConf.majorWindowSize * 60),
+          Seconds(60))
 
-    var taggedTweets : Set[Long] = Set.empty
-    var taggedTweetTokens : List[List[String]] = List.empty
-    tweetWindowStream.foreachRDD((rdd, time) => {
+      // Checkpoint the RDD
+      //tweetWindowStream.checkpoint(Seconds(TrecBurstConf.majorWindowSize * 60))
 
-      val tweetFinderStatus = future {
-        println("Status RDD Time: " + time)
-        val outputFileWriter = new FileWriter(outputFile, true)
+      // Process each tweet window
+      tweetWindowStream.foreachRDD((rdd, time) => {
 
-        var capturedTweets: Map[Status, Int] = Map.empty
+        // Use threading to avoid blocking on this topic
+        val tweetFinderStatus = future {
+          val burstyTweetCount = findImportantTweets(topic.topid, rdd, time, outputFile)
+          println("Bursty Tweet Count: " + burstyTweetCount)
 
-        println("Bursting Keyword Count: " + burstingKeywords.size + ", " + burstingKeywords.nonEmpty)
-
-        var targetTokens: List[String] = List.empty
-        while (burstingKeywords.nonEmpty) {
-          val (token, newQ) = burstingKeywords.dequeue
-          burstingKeywords = newQ
-
-          targetTokens = targetTokens :+ token
-        }
-        println("Finding tweets containing: %s".format(targetTokens))
-
-        val targetTweets = rdd.filter(tuple => {
-          val status = tuple._1
-          var flag = false
-
-          for (token <- targetTokens) {
-            if (status.getText.toLowerCase.contains(token)) {
-              flag = true
-            }
-          }
-          flag
-        }).collect.toMap
-
-        for (tweet <- targetTweets.keys) {
-          capturedTweets = capturedTweets ++ Map(tweet -> (capturedTweets.getOrElse(tweet, 0) + 1))
+          burstyTweetCount
         }
 
-        val topMatches: List[Status] = capturedTweets
-          .filter(tuple => tuple._2 == capturedTweets.values.max)
-          .map(tuple => tuple._1)
-          .toList
-          .sortBy(status => status.getCreatedAt)
+        tweetFinderStatus.onComplete {
+          case Success(x) => println("Tweet finder SUCCESS")
+          case Failure(ex) => println("Tweet finder FAILURE: " + ex.getMessage)
+        }
 
-        val leastSimilarTweets : List[(Double, Status)] = topMatches
-          .filter(tweet => taggedTweets.contains(tweet.getId) == false)
-          .map(tweet => {
-            val tweetTokens = targetTweets(tweet)
-
-            // Compute Jaccard similarity
-            var jaccardSim = 0.0
-            for ( tokenSet <- taggedTweetTokens ) {
-              val intersectionSize = tokenSet.intersect(tweetTokens).distinct.size
-              val unionSize = (tokenSet ++ tweetTokens).distinct.size
-
-              val localJaccardSim = intersectionSize.toDouble / unionSize.toDouble
-
-              jaccardSim = Math.max(localJaccardSim, jaccardSim)
-            }
-
-            taggedTweets = taggedTweets + tweet.getId
-            taggedTweetTokens = taggedTweetTokens :+ tweetTokens
-
-            (jaccardSim, tweet)
-          })
-          .filter(tuple => tuple._1 <= burstConf.similarityThreshold)
-          .sortBy(tuple => tuple._1)
-          .reverse
-          .take(burstConf.perMinuteMax)
-
-        // Match tweets to topics
-        leastSimilarTweets.map(tuple => {
-          val tweet = tuple._2
-          val lowerTweetText = tweet.getText.toLowerCase
-
-          // Construct an in-memory index for the tweet data
-          val idx = new MemoryIndex()
-          idx.addField("content", lowerTweetText, localAnalyzer)
-
-          var topicIds = List[String]()
-
-          for (topic <- topicList) {
-            if ( idx.search(localParser.parse(topic.title.toLowerCase, "content")) > 0 ) {
-              topicIds = topicIds :+ topic.topid
-
-              // Submit tweet-topic to broker
-              submitTweet(tweet, topic.topid, burstConf, wsClient)
-            }
-          }
-
-          val topicString = topicIds.reduce((l, r) => l + "+" + r)
-
-          val logEntry: String = createCsvString(topicString, time, tweet.getId, tweet.getText)
-
-          print(logEntry)
-          outputFileWriter.write(logEntry)
-        })
-
-        outputFileWriter.close()
-      }
-
-      tweetFinderStatus.onComplete {
-        case Success(x) => println("Tweet finder SUCCESS")
-        case Failure(ex) => println("Tweet finder FAILURE: " + ex.getMessage)
-      }
-    })
+      })
+    }
     
     ssc.start()
     ssc.awaitTermination()
@@ -342,8 +234,8 @@ object App {
       val analyzer = new StandardAnalyzer()
       val parser = new StandardQueryParser()
 
-      // Use AND
-      parser.setDefaultOperator(org.apache.lucene.queryparser.flexible.standard.config.StandardQueryConfigHandler.Operator.AND)
+      // Use OR
+      parser.setDefaultOperator(StandardQueryConfigHandler.Operator.OR)
 
       iter.map(status => {
         val text = status.getText
@@ -380,5 +272,179 @@ object App {
         println(s"Body: ${wsResponse.body}")
       })
 
+  }
+
+  def getHashtagCount(status : Status) : Int = {
+    val count = if ( status.getHashtagEntities != null ) {
+      status.getHashtagEntities.size
+    }  else {
+      0
+    }
+
+    return count
+  }
+
+  def getUrlCount(status : Status) : Int = {
+    val count = if ( status.getURLEntities != null ) {
+      status.getURLEntities.size
+    }  else {
+      0
+    }
+
+    return count
+  }
+
+  def findBurstsInWindow(topid : String, rdd : RDD[(String, Int)], time : Time, dateList : List[Date]) : Unit = {
+    val rddCount = dateList.length
+    val dateTag = dateList.last
+    val rddList = perTopicRdds(topid)
+    val thisBurstThreshold = perTopicBurstThresholds(topid)
+
+    println("Window Count: " + rddCount)
+    println("Dates so far: " + dateList)
+
+    // Should be (token, Map[Date, Int])
+    val datedPairs = rdd.map(tuple => (tuple._1, Map(dateTag -> tuple._2)))
+    datedPairs.persist
+    println("Topic: " + topid + ", Date: " + dateTag.toString + ", Token Count: " + datedPairs.count())
+
+    // Add these dated pairs to this topic's RDD list
+    rddList += datedPairs
+
+    // First part of window
+    val earliestDate = dateList(0)
+    println("Earliest Date: " + earliestDate)
+
+    // Merge all the RDDs in our list, so we have a full set of tokens that occur in this window
+    val mergingRdd : RDD[(String, Map[Date, Int])] = rddList.reduce((rdd1, rdd2) => {
+      rdd1 ++ rdd2
+    })
+
+    // Combine all the date maps for each token
+    val combinedRddPre : RDD[(String, Map[Date, Int])] = mergingRdd.reduceByKey((a, b) => {
+      a ++ b
+    })
+
+    val scores : RDD[(String, Double)] = ScoreGenerator.scoreFrequencyArray(combinedRddPre, dateList)
+
+    if ( rddCount >= TrecBurstConf.majorWindowSize ) {
+      val targetKeywords = scores
+        .filter(tuple => tuple._1.length > 3)
+        .filter(tuple => tuple._2 > thisBurstThreshold)
+        .map(tuple => tuple._1).collect
+
+      println("Over threshold count: " + targetKeywords.size)
+      val topTokens : List[String] = targetKeywords.take(100).toList
+      val newQueue = perTopicBurstQueue(topid).enqueue(topTokens)
+      println("Bursting Keywords count: " + newQueue.size)
+
+      // Update this topic's queue
+      perTopicBurstQueue(topid) = newQueue
+
+      // Update the burst threshold for this topic if we have a lot of bursty tokens
+      if ( topTokens.length > 10 ) {
+        val newThresh = Math.sqrt(thisBurstThreshold)
+        perTopicBurstThresholds(topid) = newThresh
+        println("Updating Threshold: " + thisBurstThreshold + " -> " + newThresh)
+      }
+    }
+
+    // Prune the date and rdd lists as needed
+    if ( dateList.size == TrecBurstConf.majorWindowSize ) {
+      // Drop the earliest RDD and unpersist it
+      val earliestRdd = rddList.head
+      earliestRdd.unpersist(false)
+      rddList.remove(0)
+    }
+  }
+
+  def findImportantTweets(topid : String, rdd : RDD[(Status, List[String])], time : Time, outputFile : String) : Int = {
+
+    println("Status RDD Time: " + time)
+    val outputFileWriter = new FileWriter(outputFile, true)
+
+    // Get the list of bursting keywords for this topic
+    val targetTokens: List[String] = perTopicBurstQueue(topid).toList
+    perTopicBurstQueue(topid) = Queue.empty
+    println("Bursting Keyword Count: " + targetTokens.size)
+    println("Finding tweets containing: %s".format(targetTokens))
+
+    // If we have no bursty tokens or no tweets, skip
+    val tweetCount = rdd.count()
+    if ( tweetCount == 0 || targetTokens.size == 0 ) {
+      return 0
+    }
+
+    // Count the frequency of bursty keywords in each tweet
+    //  and only keep those tweets that contain such a keyword
+    val targetTweets = rdd.map(tuple => {
+      val status = tuple._1
+      val tokens = tuple._2
+      val count : Int = targetTokens.map(token => if (status.getText.toLowerCase.contains(token)) { 1 } else { 0 } ).reduce(_ + _)
+
+      (status, count, tokens)
+    }).filter(t => t._2 > 0)
+    val maxCount = targetTweets.map(t => t._2).max()
+
+    // Get the tweets that appeared the most frequenly
+    //  and order by their creation date
+    val topMatches: List[(Status, List[String])] = targetTweets
+      .filter(tuple => tuple._2 == maxCount)
+      .map(tuple => (tuple._1, tuple._3))
+      .sortBy(tuple => tuple._1.getCreatedAt)
+      .collect()
+      .toList
+
+    // What tweets have we gotten for this topic before?
+    var taggedTweets = perTopicTaggedTweets(topid)
+    var taggedTweetIds = taggedTweets.map(tokedStatus => tokedStatus.status.getId)
+
+    // Remove tweets that are similar to ones we've already pushed
+    val similarityThreshold = TrecBurstConf.similarityThreshold
+    val leastSimilarTweets: List[(Double, TokenizedStatus)] = topMatches
+      .filter(tuple => taggedTweetIds.contains(tuple._1.getId) == false)
+      .map(tuple => {
+        val tweet = tuple._1
+        val tokens = tuple._2
+
+        // Compute Jaccard similarity
+        var jaccardSim = 0.0
+        for (priorTweet <- taggedTweets) {
+          val tokenSet = priorTweet.tokens
+
+          val intersectionSize = tokenSet.intersect(tokens).distinct.size
+          val unionSize = (tokenSet ++ tokens).distinct.size
+
+          val localJaccardSim = intersectionSize.toDouble / unionSize.toDouble
+
+          jaccardSim = Math.max(localJaccardSim, jaccardSim)
+        }
+
+        val tokenizedStatus = new App.TokenizedStatus(status=tweet, tokens=tokens)
+        taggedTweets = taggedTweets :+ tokenizedStatus
+        taggedTweetIds = taggedTweetIds :+ tweet.getId
+
+        (jaccardSim, tokenizedStatus)
+      })
+      .filter(tuple => tuple._1 <= similarityThreshold)
+      .sortBy(tuple => tuple._1)
+      .take(TrecBurstConf.perMinuteMax)
+
+    val finalTweets = leastSimilarTweets.map(t => t._2)
+    val pastTweets = perTopicTaggedTweets(topid)
+    perTopicTaggedTweets(topid) = pastTweets ++ finalTweets
+
+    // Match tweets to topics
+    leastSimilarTweets.map(tuple => {
+      val tweet = tuple._2
+      val logEntry: String = createCsvString(topid, time, tweet.status.getId, tweet.status.getText)
+
+      print(logEntry)
+      outputFileWriter.write(logEntry)
+    })
+
+    outputFileWriter.close()
+
+    return finalTweets.length
   }
 }

@@ -21,6 +21,7 @@ class Conf(propsFilePath : String) extends Serializable {
   val perMinuteMax : Integer  = prop.getProperty("PER_MINUTE_MAX").toInt
   val burstThreshold : Double  = prop.getProperty("BURST_THRESHOLD").toDouble
   val similarityThreshold : Double  = prop.getProperty("SIM_THRESHOLD").toDouble
+  val queryThreshold : Double  = prop.getProperty("QUERY_THRESHOLD").toDouble
 
   val maxHashtags : Integer  = prop.getProperty("MAX_HASHTAGS").toInt
   val minTokens : Integer  = prop.getProperty("MIN_TOKENS").toInt

@@ -7,10 +7,10 @@
     <packaging>jar</packaging>
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <maven.compiler.source>1.7</maven.compiler.source>
-        <maven.compiler.target>1.7</maven.compiler.target>
+        <maven.compiler.source>1.8</maven.compiler.source>
+        <maven.compiler.target>1.8</maven.compiler.target>
         <encoding>UTF-8</encoding>
-        <scala.version>2.10.4</scala.version>
+        <scala.version>2.11.4</scala.version>
     </properties>
   <licenses>
     <license>
@@ -45,8 +45,9 @@
     </dependency>
     <dependency>
         <groupId>org.apache.spark</groupId>
-        <artifactId>spark-core_2.10</artifactId>
-        <version>1.5.2</version>
+        <artifactId>spark-core_2.11</artifactId>
+        <version>2.1.1</version>
+        <scope>provided</scope>
     </dependency>
     <dependency>
         <groupId>com.google.code.gson</groupId>
@@ -55,13 +56,18 @@
     </dependency>
     <dependency>
         <groupId>org.apache.spark</groupId>
-        <artifactId>spark-streaming_2.10</artifactId>
-        <version>1.5.2</version>
+        <artifactId>spark-streaming_2.11</artifactId>
+        <version>2.1.1</version>
     </dependency>
     <dependency>
       <groupId>org.apache.spark</groupId>
-      <artifactId>spark-mllib_2.10</artifactId>
-      <version>1.5.2</version>
+      <artifactId>spark-mllib_2.11</artifactId>
+      <version>2.1.1</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.bahir</groupId>
+      <artifactId>spark-streaming-twitter_2.11</artifactId>
+      <version>2.1.0</version>
     </dependency>
     <dependency>
       <groupId>org.twitter4j</groupId>
@@ -98,6 +104,7 @@
       <artifactId>play-ws_2.10</artifactId>
       <version>2.4.8</version>
     </dependency>
+
     
     <!-- Test -->
     <dependency>
@@ -135,7 +142,6 @@
             </goals>
             <configuration>
               <args>
-                <arg>-make:transitive</arg>
                 <arg>-dependencyfile</arg>
                 <arg>${project.build.directory}/.scala_dependencies</arg>
               </args>
