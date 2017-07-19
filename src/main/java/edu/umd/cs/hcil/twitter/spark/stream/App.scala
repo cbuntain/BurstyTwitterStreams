@@ -58,7 +58,6 @@ object App {
   // Track queues for each topic
   val perTopicBurstThresholds : HashMap[String,Double] = HashMap.empty
   val perTopicBurstQueue : HashMap[String, Queue[String]] = HashMap.empty
-  val perTopicRdds : HashMap[String, ListBuffer[RDD[(String, Map[Date, Int])]]] = HashMap.empty
   val perTopicTaggedTweets : HashMap[String, List[App.TokenizedStatus]] = HashMap.empty
 
   /**
@@ -68,7 +67,7 @@ object App {
     
     val conf = new SparkConf().setAppName("Trec Real-Time Task")
     val sc = new SparkContext(conf)
-    val ssc = new StreamingContext(sc, Seconds(1))
+    val ssc = new StreamingContext(sc, Seconds(30))
     ssc.checkpoint("./checkpointDirectory")
 
     val propertiesPath = args(0)
@@ -91,7 +90,6 @@ object App {
     for ( topic <- topicList ) {
       perTopicBurstThresholds(topic.topid) = TrecBurstConf.burstThreshold
       perTopicBurstQueue(topic.topid) = Queue.empty
-      perTopicRdds(topic.topid) = ListBuffer.empty
       perTopicTaggedTweets(topic.topid) = List.empty
     }
 
@@ -141,8 +139,13 @@ object App {
         .map(token => (token, 1))
 
       val counts = userCounts
+
+      // Generate sliding window sums that merge counts for each token
+      //  across some number of minutes
+      //  NOTE: The inv func removes keys as they leave the window
       val windowSum = counts.reduceByKeyAndWindow(
         (a: Int, b: Int) => (a + b),
+        (a: Int, b: Int) => (a - b),
         Seconds(TrecBurstConf.minorWindowSize * 60),
         Seconds(60),
         numTasks
@@ -151,34 +154,64 @@ object App {
       // Checkpoint the windowSum RDD
       windowSum.checkpoint(Seconds(TrecBurstConf.majorWindowSize * 60))
 
+      val stateSpec = StateSpec.function(mappingFunction _)
+        .timeout(Seconds(60))
+
+      val windowedState = windowSum.mapWithState(stateSpec)
+
       // Build a slider of the last few minutes
       var dateList: List[Date] = List.empty
-      windowSum.foreachRDD((rdd, time) => {
+      windowedState.foreachRDD((rdd, time) => {
 
-        // Use threading to avoid blocking on this topic
-        val burstFinderStatus = future {
-          dateList = dateList :+ new Date(time.milliseconds)
+        println("Processing Topic [%s]...".format(topic.topid))
+        dateList = dateList :+ new Date(time.milliseconds)
 
-          // Call window processing code
-          findBurstsInWindow(topic.topid, rdd, time, dateList)
+        println("\tWindow Count: %d".format(dateList.length))
 
-          // Drop the earliest date
-          if (dateList.size == TrecBurstConf.majorWindowSize) {
-            dateList = dateList.slice(1, TrecBurstConf.majorWindowSize)
+        // Filter the RDD to contain concrete values, and pass them to the
+        //  scoring code
+        val concrete = rdd.filter(tup => tup.nonEmpty).map(tup => tup.get)
+        val tokenCount = concrete.count()
+        println("\tNumber of tokens: %d".format(tokenCount))
+
+        val scores : RDD[(String, Double)] = ScoreGenerator.scoreUndatedList(TrecBurstConf.majorWindowSize, concrete)
+
+        if ( dateList.length >= TrecBurstConf.majorWindowSize ) {
+          val topid = topic.topid
+
+          val thisBurstThreshold = perTopicBurstThresholds(topid)
+          val targetKeywords = scores
+            .filter(tuple => tuple._1.length > 3)
+            .filter(tuple => tuple._2 > thisBurstThreshold)
+            .map(tuple => tuple._1).collect
+
+          println("\tOver threshold count: " + targetKeywords.size)
+          val topTokens : List[String] = targetKeywords.take(100).toList
+          val newQueue = perTopicBurstQueue(topid).enqueue(topTokens)
+          println("\tBursting Keywords count: " + newQueue.size)
+
+          // Update this topic's queue
+          perTopicBurstQueue(topid) = newQueue
+
+          // Update the burst threshold for this topic if we have a lot of bursty tokens
+          if ( topTokens.length > 10 ) {
+            val newThresh = Math.sqrt(thisBurstThreshold)
+            perTopicBurstThresholds(topid) = newThresh
+            println("\tUpdating Threshold: " + thisBurstThreshold + " -> " + newThresh)
           }
         }
-        burstFinderStatus.onComplete {
-          case Success(x) => println("Burst finder SUCCESS")
-          case Failure(ex) => println("Burst finder FAILURE: " + ex.getMessage)
-        }
 
+        // Drop the earliest date
+        if (dateList.size == TrecBurstConf.majorWindowSize) {
+          dateList = dateList.slice(1, TrecBurstConf.majorWindowSize)
+        }
 
       })
 
       // Find tweets containing the bursty tokens
       val tweetWindowStream = tweetTokenPairs
         .window(
-          Seconds(TrecBurstConf.majorWindowSize * 60),
+          Seconds(TrecBurstConf.minorWindowSize * 60),
           Seconds(60))
 
       // Checkpoint the RDD
@@ -294,70 +327,6 @@ object App {
     return count
   }
 
-  def findBurstsInWindow(topid : String, rdd : RDD[(String, Int)], time : Time, dateList : List[Date]) : Unit = {
-    val rddCount = dateList.length
-    val dateTag = dateList.last
-    val rddList = perTopicRdds(topid)
-    val thisBurstThreshold = perTopicBurstThresholds(topid)
-
-    println("Window Count: " + rddCount)
-    println("Dates so far: " + dateList)
-
-    // Should be (token, Map[Date, Int])
-    val datedPairs = rdd.map(tuple => (tuple._1, Map(dateTag -> tuple._2)))
-    datedPairs.persist
-    println("Topic: " + topid + ", Date: " + dateTag.toString + ", Token Count: " + datedPairs.count())
-
-    // Add these dated pairs to this topic's RDD list
-    rddList += datedPairs
-
-    // First part of window
-    val earliestDate = dateList(0)
-    println("Earliest Date: " + earliestDate)
-
-    // Merge all the RDDs in our list, so we have a full set of tokens that occur in this window
-    val mergingRdd : RDD[(String, Map[Date, Int])] = rddList.reduce((rdd1, rdd2) => {
-      rdd1 ++ rdd2
-    })
-
-    // Combine all the date maps for each token
-    val combinedRddPre : RDD[(String, Map[Date, Int])] = mergingRdd.reduceByKey((a, b) => {
-      a ++ b
-    })
-
-    val scores : RDD[(String, Double)] = ScoreGenerator.scoreFrequencyArray(combinedRddPre, dateList)
-
-    if ( rddCount >= TrecBurstConf.majorWindowSize ) {
-      val targetKeywords = scores
-        .filter(tuple => tuple._1.length > 3)
-        .filter(tuple => tuple._2 > thisBurstThreshold)
-        .map(tuple => tuple._1).collect
-
-      println("Over threshold count: " + targetKeywords.size)
-      val topTokens : List[String] = targetKeywords.take(100).toList
-      val newQueue = perTopicBurstQueue(topid).enqueue(topTokens)
-      println("Bursting Keywords count: " + newQueue.size)
-
-      // Update this topic's queue
-      perTopicBurstQueue(topid) = newQueue
-
-      // Update the burst threshold for this topic if we have a lot of bursty tokens
-      if ( topTokens.length > 10 ) {
-        val newThresh = Math.sqrt(thisBurstThreshold)
-        perTopicBurstThresholds(topid) = newThresh
-        println("Updating Threshold: " + thisBurstThreshold + " -> " + newThresh)
-      }
-    }
-
-    // Prune the date and rdd lists as needed
-    if ( dateList.size == TrecBurstConf.majorWindowSize ) {
-      // Drop the earliest RDD and unpersist it
-      val earliestRdd = rddList.head
-      earliestRdd.unpersist(false)
-      rddList.remove(0)
-    }
-  }
-
   def findImportantTweets(topid : String, rdd : RDD[(Status, List[String])], time : Time, outputFile : String) : Int = {
 
     println("Status RDD Time: " + time)
@@ -447,4 +416,44 @@ object App {
 
     return finalTweets.length
   }
+
+
+  // A mapping function that maintains an integer state and returns a String
+  def mappingFunction(key: String, value: Option[Int], state: State[List[Int]]): Option[(String, List[Int])] = {
+
+    // Check if state exists
+    val freqListOption : Option[List[Int]] = if (state.exists) {
+
+      val existingState = state.get  // Get the existing state
+
+      // Decide whether to remove the state based on whether it is empty
+      val shouldRemove = existingState.sum == 0
+
+      if (shouldRemove) {
+        state.remove()     // Remove the state
+
+        None
+      } else {
+        val newState = existingState.takeRight(50) :+ value.getOrElse(0)
+        state.update(newState)    // Set the new state
+
+        Some(newState)
+      }
+    } else {
+
+      val initialState = List(value.getOrElse(0))
+      state.update(initialState)  // Set the initial state
+
+      Some(initialState)
+    }
+
+
+    if ( freqListOption.nonEmpty ) {
+      Some((key, freqListOption.get))
+    } else {
+      None
+    }
+  }
+
+
 }

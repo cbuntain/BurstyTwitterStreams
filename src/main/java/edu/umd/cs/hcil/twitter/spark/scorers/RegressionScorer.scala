@@ -15,7 +15,7 @@ object RegressionScorer extends Scorer {
   
   def score(freq : Array[Long]) : Double = {
     val regress = new SimpleRegression(true)
-    for ( i <- 0 to freq.length-1 ) {
+    for ( i <- 0 until freq.length ) {
       val thisWindowSum = mFreqSums(i)
       val smoothedFreqPercent = (freq(i) + 1) / (thisWindowSum + mSmoother)
       val logVal = scala.math.log(smoothedFreqPercent)
