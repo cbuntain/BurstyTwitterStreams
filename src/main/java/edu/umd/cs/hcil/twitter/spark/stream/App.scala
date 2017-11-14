@@ -7,8 +7,9 @@
 package edu.umd.cs.hcil.twitter.spark.stream
 
 import java.io.FileWriter
+import java.util.concurrent.Executors
+
 import org.apache.commons.csv.{CSVFormat, CSVPrinter}
-import twitter4j.Status
 import java.util.{Calendar, Date}
 
 import org.apache.spark._
@@ -30,13 +31,11 @@ import org.apache.lucene.index.memory.MemoryIndex
 import org.apache.lucene.queryparser.flexible.standard.StandardQueryParser
 import org.apache.lucene.queryparser.flexible.standard.config.StandardQueryConfigHandler
 
-import scala.collection.mutable.ListBuffer
 import scala.collection.mutable.HashMap
-
+import scala.collection.mutable.ListBuffer
 import scala.concurrent._
 import ExecutionContext.Implicits.global
 import scala.util.{Failure, Success}
-
 import play.api.libs.ws.ning.NingWSClient
 
 object App {
@@ -49,8 +48,9 @@ object App {
   val localAnalyzer = new StandardAnalyzer()
   val localParser = new StandardQueryParser()
 
-  // HTTP Client
-  val wsClient = NingWSClient()
+  // Burst log file
+  val burstLogFileName = "trec_burst_thresholds.log"
+  val burstTokenLogFileName = "trec_burst_tokens.log"
 
   // Configuration object
   var TrecBurstConf : Conf = null
@@ -60,6 +60,12 @@ object App {
   val perTopicBurstQueue : HashMap[String, Queue[String]] = HashMap.empty
   val perTopicTaggedTweets : HashMap[String, List[App.TokenizedStatus]] = HashMap.empty
 
+  // HTTP Client
+  @transient lazy val wsClient = NingWSClient()
+
+  // Create a thread pool for handling our analytics
+//  implicit val ec = ExecutionContext.fromExecutor(Executors.newFixedThreadPool(20))
+
   /**
    * @param args the command line arguments
    */
@@ -68,19 +74,30 @@ object App {
     val conf = new SparkConf().setAppName("Trec Real-Time Task")
     val sc = new SparkContext(conf)
     val ssc = new StreamingContext(sc, Seconds(30))
-    ssc.checkpoint("./checkpointDirectory")
 
     val propertiesPath = args(0)
     val topicsFile = args(1)
     val outputFile = args(2)
 
-    TrecBurstConf = new Conf(propertiesPath)
-    val broad_BurstConf = sc.broadcast(TrecBurstConf)
-
     var numTasks = 16
     if ( args.size > 3 ) {
       numTasks = args(3).toInt
     }
+
+    val checkpointPath = if ( args.size > 4 ) {
+      "./checkpointDirectory-" + args(4)
+    } else {
+      "./checkpointDirectory"
+    }
+    ssc.checkpoint(checkpointPath)
+
+    TrecBurstConf = new Conf(propertiesPath)
+    val broad_BurstConf = sc.broadcast(TrecBurstConf)
+
+//    val burstLogger = Logger.getLogger("BurstThreshold")
+//    val logHandler = new FileHandler(burstLogFileName, true)
+//    logHandler.setFormatter(new SimpleFormatter())
+//    burstLogger.addHandler(logHandler)
 
     val topicsJsonStr = scala.io.Source.fromFile(topicsFile).mkString
     val topicsJson = parse(topicsJsonStr)
@@ -97,14 +114,14 @@ object App {
     val replayOldStream = false
 
     // If we are going to use the direct twitter stream, use TwitterUtils. Else, use socket.
-    val twitterStream = if ( replayOldStream == false ) {
+    val twitterStream = (if ( replayOldStream == false ) {
       TwitterUtils.createStream(ssc, None)
     } else {
       val textStream = ssc.socketTextStream("localhost", 9999)
       textStream.map(line => {
         TwitterObjectFactory.createStatus(line)
       })
-    }
+    }).repartition(numTasks)
 
     // Remove tweets not in English and other filters
     val noRetweetStream = twitterStream
@@ -116,6 +133,7 @@ object App {
           getHashtagCount(status) <= broad_BurstConf.value.maxHashtags &&
           getUrlCount(status) <= broad_BurstConf.value.maxUrls
     })
+    noRetweetStream.cache()
 
     // For each topic, process the twitter stream accordingly
     for ( topic <- topicList ) {
@@ -148,11 +166,12 @@ object App {
         (a: Int, b: Int) => (a - b),
         Seconds(TrecBurstConf.minorWindowSize * 60),
         Seconds(60),
-        numTasks
+        numTasks/2
       )
 
       // Checkpoint the windowSum RDD
-      windowSum.checkpoint(Seconds(TrecBurstConf.majorWindowSize * 60))
+      windowSum.checkpoint(Seconds(TrecBurstConf.minorWindowSize * 60))
+      windowSum.cache()
 
       val stateSpec = StateSpec.function(mappingFunction _)
         .timeout(Seconds(60))
@@ -161,49 +180,81 @@ object App {
 
       // Build a slider of the last few minutes
       var dateList: List[Date] = List.empty
+      val burstyTokenCount : ListBuffer[Int] = ListBuffer.empty
       windowedState.foreachRDD((rdd, time) => {
 
-        println("Processing Topic [%s]...".format(topic.topid))
-        dateList = dateList :+ new Date(time.milliseconds)
-
-        println("\tWindow Count: %d".format(dateList.length))
-
-        // Filter the RDD to contain concrete values, and pass them to the
-        //  scoring code
-        val concrete = rdd.filter(tup => tup.nonEmpty).map(tup => tup.get)
-        val tokenCount = concrete.count()
-        println("\tNumber of tokens: %d".format(tokenCount))
-
-        val scores : RDD[(String, Double)] = ScoreGenerator.scoreUndatedList(TrecBurstConf.majorWindowSize, concrete)
-
-        if ( dateList.length >= TrecBurstConf.majorWindowSize ) {
+        {
           val topid = topic.topid
+          println("Processing Topic [%s]...".format(topid))
+          dateList = dateList :+ new Date(time.milliseconds)
 
-          val thisBurstThreshold = perTopicBurstThresholds(topid)
-          val targetKeywords = scores
-            .filter(tuple => tuple._1.length > 3)
-            .filter(tuple => tuple._2 > thisBurstThreshold)
-            .map(tuple => tuple._1).collect
+          println("\t" + topid + " - Window Count: %d".format(dateList.length))
 
-          println("\tOver threshold count: " + targetKeywords.size)
-          val topTokens : List[String] = targetKeywords.take(100).toList
-          val newQueue = perTopicBurstQueue(topid).enqueue(topTokens)
-          println("\tBursting Keywords count: " + newQueue.size)
+          // Filter the RDD to contain concrete values, and pass them to the
+          //  scoring code
+          val concrete = rdd.filter(tup => tup.nonEmpty).map(tup => tup.get)
+          val tokenCount = concrete.count()
 
-          // Update this topic's queue
-          perTopicBurstQueue(topid) = newQueue
+          if (tokenCount > 0) {
 
-          // Update the burst threshold for this topic if we have a lot of bursty tokens
-          if ( topTokens.length > 10 ) {
-            val newThresh = Math.sqrt(thisBurstThreshold)
-            perTopicBurstThresholds(topid) = newThresh
-            println("\tUpdating Threshold: " + thisBurstThreshold + " -> " + newThresh)
+            println("\t" + topid +  " - Number of tokens: %d".format(tokenCount))
+            val scores: RDD[(String, Double)] = ScoreGenerator.scoreUndatedList(TrecBurstConf.majorWindowSize, concrete)
+
+            if (dateList.length >= TrecBurstConf.majorWindowSize) {
+
+              val thisBurstThreshold = perTopicBurstThresholds(topid)
+              val targetKeywordScores = scores
+                .filter(tuple => tuple._1.length > 3)
+                .filter(tuple => tuple._2 > thisBurstThreshold)
+                .collect
+              val targetKeywords = targetKeywordScores.map(tuple => tuple._1)
+
+              // Update the number of bursty tokens we've seen
+              burstyTokenCount.append(targetKeywords.length)
+
+              if (targetKeywords.size > 0) {
+                println("\t" + topid + " - Over threshold count: " + targetKeywords.size)
+                val topTokens: List[String] = targetKeywords.take(100).toList
+                val newQueue = perTopicBurstQueue(topid).enqueue(topTokens)
+                println("\t" + topid + " - Bursting Keywords count: " + newQueue.size)
+
+                storeBurstyKeywords(topid, targetKeywordScores.take(100).toList, time.milliseconds)
+
+                // Update this topic's queue
+                perTopicBurstQueue(topid) = newQueue
+
+                // Update the burst threshold for this topic if we have a lot of bursty tokens
+                if (topTokens.length > 10) {
+                  val newThresh = Math.pow(thisBurstThreshold, TrecBurstConf.thresholdModifier)
+                  updateBurstThreshold(newThresh, thisBurstThreshold, topid, topTokens.length)
+                }
+              } else {
+
+                // Should we ease the burst threshold?
+                //  Look at the past few times we had relevant tokens to see how many
+                //  times we found zero bursty keywords
+                if ( burstyTokenCount.length > 3*TrecBurstConf.majorWindowSize ) {
+                  val burstySum = burstyTokenCount.takeRight(3*TrecBurstConf.majorWindowSize).reduce(_ + _)
+
+                  // Haven't had a bursty token in a while, so ease burst threshold?
+                  if ( burstySum == 0 ) {
+                    val newThresh = Math.pow(thisBurstThreshold, 1.0/TrecBurstConf.thresholdModifier)
+
+                    // Don't want to drop below the minimum threshold with which we start
+                    if ( newThresh >= TrecBurstConf.burstThreshold ) {
+                      updateBurstThreshold(newThresh, thisBurstThreshold, topid, 0)
+                    }
+                  }
+                }
+
+              }
+            }
+
+            // Drop the earliest date
+            if (dateList.size == TrecBurstConf.majorWindowSize) {
+              dateList = dateList.slice(1, TrecBurstConf.majorWindowSize)
+            }
           }
-        }
-
-        // Drop the earliest date
-        if (dateList.size == TrecBurstConf.majorWindowSize) {
-          dateList = dateList.slice(1, TrecBurstConf.majorWindowSize)
         }
 
       })
@@ -214,6 +265,8 @@ object App {
           Seconds(TrecBurstConf.minorWindowSize * 60),
           Seconds(60))
 
+      //
+
       // Checkpoint the RDD
       //tweetWindowStream.checkpoint(Seconds(TrecBurstConf.majorWindowSize * 60))
 
@@ -223,15 +276,17 @@ object App {
         // Use threading to avoid blocking on this topic
         val tweetFinderStatus = future {
           val burstyTweetCount = findImportantTweets(topic.topid, rdd, time, outputFile)
-          println("Bursty Tweet Count: " + burstyTweetCount)
+          if ( burstyTweetCount > 0 ) {
+            println(topic.topid + " - Bursty Tweet Count: " + burstyTweetCount + "\n")
+          }
 
           burstyTweetCount
         }
 
-        tweetFinderStatus.onComplete {
-          case Success(x) => println("Tweet finder SUCCESS")
-          case Failure(ex) => println("Tweet finder FAILURE: " + ex.getMessage)
-        }
+//        tweetFinderStatus.onComplete {
+//          case Success(x) => println("Tweet finder SUCCESS")
+//          case Failure(ex) => println("Tweet finder FAILURE: " + ex.getMessage)
+//        }
 
       })
     }
@@ -404,12 +459,13 @@ object App {
     perTopicTaggedTweets(topid) = pastTweets ++ finalTweets
 
     // Match tweets to topics
-    leastSimilarTweets.map(tuple => {
+    leastSimilarTweets.foreach(tuple => {
       val tweet = tuple._2
       val logEntry: String = createCsvString(topid, time, tweet.status.getId, tweet.status.getText)
 
       print(logEntry)
       outputFileWriter.write(logEntry)
+      submitTweet(tweet.status, topid, TrecBurstConf, wsClient)
     })
 
     outputFileWriter.close()
@@ -456,4 +512,33 @@ object App {
   }
 
 
+  // For updating burst thresholds
+  def updateBurstThreshold(newThresh : Double, oldThresh : Double, topid : String, burstCount : Int): Unit = {
+    perTopicBurstThresholds(topid) = newThresh
+    println("\t[%s] - Updating Threshold: %f -> %f".format(topid, oldThresh, newThresh))
+
+    val outputFileWriter = new FileWriter(burstLogFileName, true)
+    outputFileWriter.write("Topic: %s, Bursty Token Count: %d, Old Threshold: %f, New Threshold: %f\n".format(
+      topid,
+      burstCount,
+      oldThresh,
+      newThresh
+    ))
+    outputFileWriter.close()
+  }
+
+  // For updating burst thresholds
+  def storeBurstyKeywords(topid : String, keywords : List[(String,Double)], time : Long): Unit = {
+
+    val outputFileWriter = new FileWriter(burstTokenLogFileName, true)
+    for ( keywordTup <- keywords ) {
+      outputFileWriter.write("%s,%s,%f,%d\n".format(
+        topid,
+        keywordTup._1,
+        keywordTup._2,
+        time
+      ))
+    }
+    outputFileWriter.close()
+  }
 }
