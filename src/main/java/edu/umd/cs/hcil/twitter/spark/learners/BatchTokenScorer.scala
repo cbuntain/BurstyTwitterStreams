@@ -10,8 +10,7 @@ import java.io.FileWriter
 import java.util.Date
 
 import edu.umd.cs.hcil.twitter.spark.common.{Conf, ScoreGenerator}
-import edu.umd.cs.hcil.twitter.spark.utils.DateUtils
-import edu.umd.cs.twitter.tokenizer.TweetTokenizer
+import edu.umd.cs.hcil.twitter.spark.utils.{DateUtils, StatusTokenizer}
 import org.apache.commons.csv.{CSVFormat, CSVPrinter}
 import org.apache.spark._
 import org.apache.spark.rdd.RDD
@@ -177,9 +176,8 @@ object BatchTokenScorer {
       // Create pairs of statuses and tokens in those statuses
       val tweetTokenPairs = thisDatesRdd.map(tuple => {
         val status = tuple._2
-        val tokenizer = new TweetTokenizer
-        val tweet = tokenizer.tokenizeTweet(status.getText)
-        val tokens = tweet.getTokens.asScala ++ status.getHashtagEntities.map(ht => ht.getText)
+        val tweet = StatusTokenizer.tokenize(status)
+        val tokens = tweet ++ status.getHashtagEntities.map(ht => ht.getText)
         (status, tokens.map(str => str.toLowerCase).toList)
       }).filter(tuple => tuple._2.size >= burstConf.minTokens)
       tweetTokenPairs.persist()

@@ -10,8 +10,7 @@ import java.io.FileWriter
 import java.util.Date
 
 import edu.umd.cs.hcil.twitter.spark.common.{Conf, ScoreGenerator}
-import edu.umd.cs.hcil.twitter.spark.utils.DateUtils
-import edu.umd.cs.twitter.tokenizer.TweetTokenizer
+import edu.umd.cs.hcil.twitter.spark.utils.{DateUtils, StatusTokenizer}
 import org.apache.commons.csv.{CSVFormat, CSVPrinter}
 import org.apache.spark._
 import org.apache.spark.rdd.RDD
@@ -37,11 +36,6 @@ object OfflineGateApp {
   // Record all tweets we tag
   var taggedTweets : Set[Long] = Set.empty
   var taggedTweetTokens : List[List[String]] = List.empty
-
-  // A wicked hack to perform expensive instantiation of the tokenizer
-  object TransientTokenizer {
-    @transient lazy val tokenizer = new TweetTokenizer
-  }
 
   /**
    * @param args the command line arguments
@@ -190,8 +184,7 @@ object OfflineGateApp {
         val status = tuple._2
         var tokens : List[String] = List.empty
         try {
-          val tweet = TransientTokenizer.tokenizer.tokenizeTweet(status.getText)
-          tokens = tweet.getTokens.asScala.toList ++ status.getHashtagEntities.map(ht => ht.getText)
+          tokens = StatusTokenizer.tokenize(status) ++ status.getHashtagEntities.map(ht => ht.getText)
         } catch {
           case e : Exception => println("Tokenization failed on tweet: " + status.getText)
         }

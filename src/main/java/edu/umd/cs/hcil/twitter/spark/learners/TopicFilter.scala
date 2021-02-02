@@ -11,7 +11,6 @@ import java.util.Date
 
 import edu.umd.cs.hcil.twitter.spark.common.{Conf, ScoreGenerator}
 import edu.umd.cs.hcil.twitter.spark.utils.DateUtils
-import edu.umd.cs.twitter.tokenizer.TweetTokenizer
 import org.apache.commons.csv.{CSVFormat, CSVPrinter}
 import org.apache.spark._
 import org.apache.spark.rdd.RDD

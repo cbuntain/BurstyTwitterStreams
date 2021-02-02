@@ -7,8 +7,9 @@
 package edu.umd.cs.hcil.twitter.spark.learners
 
 import java.util.Date
-import java.util.Locale;
+import java.util.Locale
 import java.text.SimpleDateFormat
+
 import scala.collection.JavaConverters._
 import org.apache.spark._
 import org.apache.spark.rdd.RDD
@@ -18,10 +19,9 @@ import twitter4j.Status
 import twitter4j.json.DataObjectFactory
 import org.apache.commons.csv.CSVFormat
 import org.apache.commons.csv.CSVPrinter
-import edu.umd.cs.twitter.tokenizer.TweetTokenizer
 import edu.umd.cs.hcil.twitter.spark.common.Conf
 import edu.umd.cs.hcil.twitter.spark.common.ScoreGenerator
-import edu.umd.cs.hcil.twitter.spark.utils.DateUtils
+import edu.umd.cs.hcil.twitter.spark.utils.{DateUtils, StatusTokenizer}
 
 object LearnerApp {
   
@@ -146,14 +146,11 @@ object LearnerApp {
         val date = tuple._1
         val statusList = tuple._2
         
-        val tokenizer = new TweetTokenizer
-        
         val tokenizedStatuses = statusList.map(status => {
             try {
-              val tokenizedTweet = tokenizer.tokenizeTweet(status.getText)
 
               val hashtagList: List[String] = status.getHashtagEntities.toList.map(hte => "#" + hte.getText)
-              val tokens: List[String] = tokenizedTweet.getTokens.asScala.toList ++ hashtagList
+              val tokens: List[String] = StatusTokenizer.tokenize(status) ++ hashtagList
 
               new TokenizedStatus(status, tokens)
             } catch {

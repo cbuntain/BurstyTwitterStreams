@@ -12,8 +12,9 @@ import java.util.{Date, Locale}
 
 import edu.umd.cs.hcil.twitter.spark.common.{Conf, ScoreGenerator}
 import edu.umd.cs.hcil.twitter.spark.utils.DateUtils
-import edu.umd.cs.twitter.tokenizer.TweetTokenizer
+import edu.umd.cs.hcil.twitter.spark.utils.StatusTokenizer
 import org.apache.commons.csv.{CSVFormat, CSVPrinter}
+import org.apache.commons.math3.stat.descriptive.rank.Percentile
 import org.apache.spark.{SparkContext, _}
 import org.apache.spark.rdd.RDD
 import twitter4j.Status
@@ -45,6 +46,7 @@ object LearnerStatistics {
 
     val dataPath = args(1)
     val outputPath = args(2)
+    val percentile = new Percentile
     
     val twitterMsgsRaw = sc.textFile(dataPath)
     println("Initial Partition Count: " + twitterMsgsRaw.partitions.size)
@@ -78,13 +80,32 @@ object LearnerStatistics {
       })
     
     // Create a keyed pair with Date -> Tweet Map
-    val timedTweets = tweetsFiltered.map(tweet => 
-      (DateUtils.convertTimeToSlice(tweet.getCreatedAt), List(tweet)))
+    val timedTweets = tweetsFiltered.map(status => {
+      var statusObj : TokenizedStatus = null
+
+      try {
+        val tokenizedTweet = StatusTokenizer.tokenize(status)
+
+        statusObj = new TokenizedStatus(status, tokenizedTweet)
+      } catch {
+        case e : Exception => null
+      }
+
+      (DateUtils.convertTimeToSlice(status.getCreatedAt), statusObj)
+    }).filter(tup => tup._2 != null)
+
+    val createNewStatusList = (status : TokenizedStatus) => {
+      List[TokenizedStatus](status)
+    }
+    val statusCombiner = (statusList : List[TokenizedStatus], status : TokenizedStatus) => {
+      statusList :+ status
+    }
+    val listCombiner = (leftList : List[TokenizedStatus], rightList : List[TokenizedStatus] ) => {
+      leftList ++ rightList
+    }
 
     // Combine same Date keys to create a list of tweets for that date
-    val groupedTweets : RDD[Tuple2[Date, List[Status]]] = timedTweets.reduceByKey(
-      (l, r) => l ++ r
-    )
+    val groupedTweets  = timedTweets.combineByKey(createNewStatusList, statusCombiner, listCombiner)
 
     // Extract the dates in this RDD
     val times = groupedTweets.keys
@@ -128,9 +149,9 @@ object LearnerStatistics {
     var fullKeyList = DateUtils.constructDateList(minTime, maxTime)
     println("Date Key List Size: " + fullKeyList.size)
 
-    val fullKeyTupleList : List[Tuple2[Date, List[Status]]] = 
+    val fullKeyTupleList : List[Tuple2[Date, List[TokenizedStatus]]] =
       fullKeyList.map(key => (key, List()))
-    val fullKeyRdd : RDD[Tuple2[Date, List[Status]]] = 
+    val fullKeyRdd : RDD[Tuple2[Date, List[TokenizedStatus]]] =
       sc.parallelize(fullKeyTupleList, newPartitionSize)
 
     // Merge the full date RDD with the existing data to fill any gaps
@@ -138,33 +159,9 @@ object LearnerStatistics {
     val mergedDates = withFullDates.reduceByKey((l, r) => l ++ r, newPartitionSize)
     printf("mergedDates Partition Size: " + mergedDates.partitions.size + "\n")
     
-    // Tokenize all the tweets. 
-    //  NOTE: This could take a while...
-    val tokenizedTweets = mergedDates.map(tuple => {
-        val date = tuple._1
-        val statusList = tuple._2
-        
-        val tokenizer = new TweetTokenizer
-        
-        val tokenizedStatuses = statusList.map(status => {
-            try {
-              val tokenizedTweet = tokenizer.tokenizeTweet(status.getText)
-
-              val hashtagList: List[String] = status.getHashtagEntities.toList.map(hte => "#" + hte.getText)
-              val tokens: List[String] = tokenizedTweet.getTokens.asScala.toList ++ hashtagList
-
-              new TokenizedStatus(status, tokens)
-            } catch {
-              case e : Exception => null
-            }
-          }).filter(status => status != null)
-        
-        (date, tokenizedStatuses)
-      })
-    
     // Create a map and invert map for our date list, so we can merge dates 
     //  for the minor window
-    val windows = mergeToMinorWindows(tokenizedTweets, fullKeyList, burstConf.minorWindowSize)
+    val windows = mergeToMinorWindows(mergedDates, fullKeyList, burstConf.minorWindowSize)
     printf("windows Partition Size: " + windows.partitions.size + "\n")
     
     // Create an RDD of dates to user token counts
@@ -184,12 +181,16 @@ object LearnerStatistics {
         })
       
       // Invert the Date->String->Int map to String->Date->Int
-      val invertedRdd = thisWindowRdd.flatMap(tuple => {
+      val invertedRddRaw = thisWindowRdd.flatMap(tuple => {
           val date = tuple._1
           val tokenMap = tuple._2
           
           tokenMap.mapValues(count => Map(date -> count))
-        }).reduceByKey((l, r) => l ++ r)
+        })
+
+      // Need to merge the maps, so we can check if any dates are missing
+      //  in the scoring function
+      val invertedRdd = invertedRddRaw.reduceByKey((l, r) => l ++ r)
       
       // TODO: Remove debugging statements
       println("Running Window: " + dateWindow)  
@@ -214,13 +215,14 @@ object LearnerStatistics {
       })
 
       val avg = sum / count
-      val csvStr = createCsvString(dateWindow.last, min, max, avg)
+      val sigma = scores.map(tuple => tuple._2).stdev()
+      val csvStr = createCsvString(dateWindow.last, min, max, avg, sigma)
 
       outputFileWriter.write(csvStr)
       outputFileWriter.flush()
 
       // Debugging print statements
-      println("Date:" + dateWindow.last + " - " + min + ", " + max + ", " + sum + ", " + count + ", " + avg)
+      println("Date:" + dateWindow.last + " - " + min + ", " + max + ", " + sum + ", " + count + ", " + avg + ", " + sigma)
 //      val sortedScores = scores.sortBy(tuple => tuple._2, false)
 //      val topList = sortedScores.take(50)
 //      println("\nPopular topics, Now: %s, Window: %s".format(new Date().toString, dateWindow.last.toString))
@@ -230,7 +232,7 @@ object LearnerStatistics {
     outputFileWriter.close()
   }
 
-  def createCsvString(date : Date, min : Double, max : Double, avg : Double) : String = {
+  def createCsvString(date : Date, min : Double, max : Double, avg : Double, sigma: Double) : String = {
     val buff = new StringBuffer()
     val writer = new CSVPrinter(buff, CSVFormat.DEFAULT)
 
@@ -241,6 +243,7 @@ object LearnerStatistics {
     writer.print(min)
     writer.print(max)
     writer.print(avg)
+    writer.print(sigma)
 
     buff.toString + "\n"
   }

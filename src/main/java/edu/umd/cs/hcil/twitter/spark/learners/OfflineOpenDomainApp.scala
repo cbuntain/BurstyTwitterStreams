@@ -12,30 +12,22 @@ import java.util.Date
 import edu.umd.cs.hcil.twitter.spark.common.{Conf, ScoreGenerator}
 import edu.umd.cs.hcil.twitter.spark.utils.{DateUtils, StatusTokenizer}
 import org.apache.commons.csv.{CSVFormat, CSVPrinter}
-import org.apache.lucene.analysis.standard.StandardAnalyzer
-import org.apache.lucene.index.memory.MemoryIndex
-import org.apache.lucene.queryparser.flexible.standard.StandardQueryParser
 import org.apache.spark._
 import org.apache.spark.rdd.RDD
 import org.json4s._
 import org.json4s.jackson.JsonMethods._
-import twitter4j.{Status, TwitterException, TwitterObjectFactory}
+import twitter4j.{Status, TwitterObjectFactory}
 
-import scala.collection.JavaConverters._
 import scala.util.control.Breaks._
 
-object OfflineApp {
+object OfflineOpenDomainApp {
 
   implicit val formats = DefaultFormats // Brings in default date formats etc.
-  case class Topic(title: String, topid: String, description: String, narrative: String)
+  case class Topic(title: String, num: String, tokens: List[String])
 
   // Record all tweets we tag
   var taggedTweets : Set[Long] = Set.empty
   var taggedTweetTokens : List[List[String]] = List.empty
-
-  // Construct an analyzer for our tweet text
-  val localAnalyzer = new StandardAnalyzer()
-  val localParser = new StandardQueryParser()
 
   /**
    * @param args the command line arguments
@@ -47,8 +39,7 @@ object OfflineApp {
 
     val propertiesPath = args(0)
     val dataPath = args(1)
-    val topicsFile = args(2)
-    val outputFile = args(3)
+    val outputFile = args(2)
 
     val burstConf = new Conf(propertiesPath)
 
@@ -56,17 +47,12 @@ object OfflineApp {
     println("Initial Partition Count: " + twitterMsgsRaw.partitions.size)
 
     var twitterMsgs = twitterMsgsRaw
-    if (args.size > 4) {
-      val initialPartitions = args(4).toInt
+    if (args.size > 3) {
+      val initialPartitions = args(3).toInt
       twitterMsgs = twitterMsgsRaw.repartition(initialPartitions)
       println("New Partition Count: " + twitterMsgs.partitions.size)
     }
     val newPartitionSize = twitterMsgs.partitions.size
-
-    val topicsJsonStr = scala.io.Source.fromFile(topicsFile).mkString
-    val topicsJson = parse(topicsJsonStr)
-    val topicList = topicsJson.extract[List[Topic]]
-    val topicTitleList = topicList.map(topic => topic.title.toLowerCase)
 
     // If we are going to use the direct twitter stream, use TwitterUtils. Else, use socket.
     val twitterStream = twitterMsgs.map(line => {
@@ -88,7 +74,7 @@ object OfflineApp {
     })
 
     // Only keep tweets that contain a topic token
-    val topicalTweetStream : RDD[Status] = querier(topicTitleList, noRetweetStream, 0.0d)
+    val topicalTweetStream = noRetweetStream
 
     // Create a (time, status) pair from each tweet, replicated MINOR_WINDOW_SIZE times
     val timedTopicalTweetStream = topicalTweetStream.flatMap(status => {
@@ -224,7 +210,7 @@ object OfflineApp {
 
       // Find the best tweets containing the top tokens and write to output file
       val outputFileWriter = new FileWriter(outputFile, true)
-      val logEntries = findGoodTweets(time, burstingKeywords, tweetRddList, topicList, burstConf)
+      val logEntries = findGoodTweets(time, burstingKeywords, tweetRddList, burstConf)
       logEntries.foreach(logEntry => outputFileWriter.write(logEntry))
       outputFileWriter.close()
 
@@ -266,7 +252,6 @@ object OfflineApp {
                       time : Date,
                       targetTokens : List[String],
                       tweetRddList: List[RDD[(Status, List[String])]],
-                      topicList : List[OfflineApp.Topic],
                       burstConf : Conf) : List[String] = {
 
     println("Status RDD Time: " + time)
@@ -329,23 +314,8 @@ object OfflineApp {
 
     leastSimilarTweets.map(tuple => {
       val tweet = tuple._2
-      val lowerTweetText = tweet.getText.toLowerCase
 
-      // Construct an in-memory index for the tweet data
-      val idx = new MemoryIndex()
-      idx.addField("content", lowerTweetText, localAnalyzer)
-
-      var topicIds = List[String]()
-
-      for (topic <- topicList) {
-        if ( idx.search(localParser.parse(topic.title.toLowerCase, "content")) > 0 ) {
-          topicIds = topicIds :+ topic.topid
-        }
-      }
-
-      val topicString = topicIds.reduce((l, r) => l + "+" + r)
-
-      val logEntry: String = createCsvString(topicString, time, tweet.getId, tweet.getText)
+      val logEntry: String = createCsvString("OPEN_DOMAIN", time, tweet.getId, tweet.getText)
 
       print(logEntry)
 
@@ -353,36 +323,5 @@ object OfflineApp {
     })
 
     return logEntries
-  }
-
-  def querier(queries : List[String], statusList : RDD[Status], threshold : Double) : RDD[Status] = {
-    // Pseudo-Relevance feedback
-    val scoredPairs = statusList.mapPartitions(iter => {
-      // Construct an analyzer for our tweet text
-      val analyzer = new StandardAnalyzer()
-      val parser = new StandardQueryParser()
-
-      // Use OR to be consistent with Gnip
-      parser.setDefaultOperator(org.apache.lucene.queryparser.flexible.standard.config.StandardQueryConfigHandler.Operator.AND)
-
-      iter.map(status => {
-        val text = status.getText
-
-        // Construct an in-memory index for the tweet data
-        val idx = new MemoryIndex()
-
-        idx.addField("content", text.toLowerCase(), analyzer)
-
-        var score = 0.0d
-        for ( q <- queries ) {
-          score = score + idx.search(parser.parse(q, "content"))
-        }
-
-        (status, score)
-      })
-    }).filter(tuple => tuple._2 > threshold)
-      .map(tuple => tuple._1)
-
-    return scoredPairs
   }
 }

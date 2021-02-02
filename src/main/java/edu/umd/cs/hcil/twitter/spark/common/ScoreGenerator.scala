@@ -14,8 +14,66 @@ import org.apache.commons.math3.linear.ArrayRealVector
 import edu.umd.cs.hcil.twitter.spark.scorers.RegressionScorer
 
 object ScoreGenerator {
-  
-  def scoreFrequencyArray(combinedRdd : RDD[Tuple2[String, Map[Date, Int]]], dateList : List[Date]) : RDD[Tuple2[String, Double]] = {
+
+  def scoreUndatedList(memory : Int, combinedRdd : RDD[(String, List[Int])]) : RDD[(String, Double)] = {
+
+    // Count up all the tokens in this window
+    val smoothFactor = combinedRdd.keys.count
+
+    // Calculate the sum at each time slice
+    val sliceSums = combinedRdd.aggregate(
+      Array.fill(memory)(0L)
+    )((sumArr, value) => {
+      val accum = Array.fill(memory)(0L)
+
+      val thisDimSum = sumArr
+      val thisTokenDim = value._2
+
+      val untilIndex = Math.min(memory, thisTokenDim.length)
+
+      for ( j <- 0 until untilIndex ) {
+        val currentSum = thisDimSum(j)
+        val thisTokenCount = thisTokenDim(j)
+
+        accum(j) = currentSum + thisTokenCount
+      }
+
+      accum
+
+    }, (sumArr, sumArr2) => {
+      val accum = Array.fill(memory)(0L)
+
+      for ( j <- 0 until memory ) {
+        accum(j) = sumArr(j) + sumArr2(j)
+      }
+
+      accum
+    })
+
+    // Now score the frequency arrays
+    val featureRdd = combinedRdd.mapValues(v => {
+
+      // Make sure the regression scorer knows the normalizing factors
+      RegressionScorer.mFreqSums = sliceSums
+      RegressionScorer.mSmoother = smoothFactor
+
+      val arrRaw = v.map(i => i.toLong).toArray.takeRight(memory)
+
+      Array(
+        RegressionScorer.score(arrRaw)
+      )
+    })
+
+    val normalizedFeatures = featureRdd
+
+    val normRdd = normalizedFeatures.mapValues(arr => {
+      new ArrayRealVector(arr).getNorm
+    })
+
+    return normRdd
+  }
+
+  def scoreFrequencyArray(combinedRdd : RDD[(String, Map[Date, Int])], dateList : List[Date]) : RDD[(String, Double)] = {
     
     // Make sure each token has an entry for each date
     val allDatesCombinedRdd = combinedRdd.mapValues(m => {
