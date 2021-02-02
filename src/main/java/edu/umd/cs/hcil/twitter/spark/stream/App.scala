@@ -78,18 +78,16 @@ object App {
     val propertiesPath = args(0)
     val topicsFile = args(1)
     val outputFile = args(2)
+    val filtersFile = args(3)
 
     var numTasks = 16
-    if ( args.size > 3 ) {
-      numTasks = args(3).toInt
-    }
 
-    val checkpointPath = if ( args.size > 4 ) {
-      "./checkpointDirectory-" + args(4)
-    } else {
+    val checkpointPath = {
       "./checkpointDirectory"
     }
     ssc.checkpoint(checkpointPath)
+
+    val filters = scala.io.Source.fromFile(filtersFile).mkString.split("\n")
 
     TrecBurstConf = new Conf(propertiesPath)
     val broad_BurstConf = sc.broadcast(TrecBurstConf)
@@ -110,12 +108,14 @@ object App {
       perTopicTaggedTweets(topic.topid) = List.empty
     }
 
+
+
     // If true, we use a socket. If false, we use the direct Twitter stream
     val replayOldStream = false
 
     // If we are going to use the direct twitter stream, use TwitterUtils. Else, use socket.
     val twitterStream = (if ( replayOldStream == false ) {
-      TwitterUtils.createStream(ssc, None)
+      TwitterUtils.createStream(ssc, None, filters)
     } else {
       val textStream = ssc.socketTextStream("localhost", 9999)
       textStream.map(line => {
