@@ -27,7 +27,7 @@ import scala.util.control.Breaks._
 object OfflineApp {
 
   implicit val formats = DefaultFormats // Brings in default date formats etc.
-  case class Topic(title: String, topid: String, description: String, narrative: String)
+  case class Topic(query: String, topid: String, description: String, narrative: String)
 
   // Record all tweets we tag
   var taggedTweets : Set[Long] = Set.empty
@@ -66,7 +66,7 @@ object OfflineApp {
     val topicsJsonStr = scala.io.Source.fromFile(topicsFile).mkString
     val topicsJson = parse(topicsJsonStr)
     val topicList = topicsJson.extract[List[Topic]]
-    val topicTitleList = topicList.map(topic => topic.title.toLowerCase)
+    val topicTitleList = topicList.map(topic => topic.query.toLowerCase)
 
     // If we are going to use the direct twitter stream, use TwitterUtils. Else, use socket.
     val twitterStream = twitterMsgs.map(line => {
@@ -338,7 +338,7 @@ object OfflineApp {
       var topicIds = List[String]()
 
       for (topic <- topicList) {
-        if ( idx.search(localParser.parse(topic.title.toLowerCase, "content")) > 0 ) {
+        if ( idx.search(localParser.parse(topic.query, "content")) > 0 ) {
           topicIds = topicIds :+ topic.topid
         }
       }

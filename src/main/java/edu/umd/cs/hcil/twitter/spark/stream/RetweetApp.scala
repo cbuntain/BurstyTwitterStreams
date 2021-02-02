@@ -31,7 +31,7 @@ import scala.concurrent._
 object RetweetApp {
 
   implicit val formats = DefaultFormats // Brings in default date formats etc.
-  case class Topic(title: String, topid: String, description: String, narrative: String)
+  case class Topic(query: String, topid: String, description: String, narrative: String)
   case class TokenizedStatus(status : Status, tokens : List[String])
 
   // Construct an analyzer for our tweet text
@@ -124,7 +124,7 @@ object RetweetApp {
     for ( topic <- topicList ) {
 
       // Only keep tweets that contain a topic token
-      val topicalTweetStream = querier(List(topic.title), retweetStream, TrecBurstConf.queryThreshold)
+      val topicalTweetStream = querier(List(topic.query), retweetStream, TrecBurstConf.queryThreshold)
 
       // Process each tweet window
       topicalTweetStream.foreachRDD((rdd, time) => {

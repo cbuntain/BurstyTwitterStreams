@@ -6,7 +6,7 @@ import org.json4s.jackson.JsonMethods._
 object JsonReader {
 
   implicit val formats = DefaultFormats // Brings in default date formats etc.
-  case class Topic(title: String, num: String, tokens: List[String])
+  case class Topic(query: String, num: String, tokens: List[String])
 
   def main(args: Array[String]): Unit = {
 

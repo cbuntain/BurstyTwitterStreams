@@ -27,7 +27,7 @@ object TopicFilter {
   var burstConf : Conf = null
 
   implicit val formats = DefaultFormats // Brings in default date formats etc.
-  case class Topic(title: String, num: String, tokens: List[String])
+  case class Topic(query: String, num: String, tokens: List[String])
 
   // Record all tweets we tag
   var taggedTweets : Set[Long] = Set.empty

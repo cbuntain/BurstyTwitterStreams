@@ -41,7 +41,7 @@ import play.api.libs.ws.ning.NingWSClient
 object App {
 
   implicit val formats = DefaultFormats // Brings in default date formats etc.
-  case class Topic(title: String, topid: String, description: String, narrative: String)
+  case class Topic(query: String, topid: String, description: String, narrative: String)
   case class TokenizedStatus(status : Status, tokens : List[String])
 
   // Construct an analyzer for our tweet text
@@ -139,7 +139,7 @@ object App {
     for ( topic <- topicList ) {
 
       // Only keep tweets that contain a topic token
-      val topicalTweetStream = querier(List(topic.title), noRetweetStream, TrecBurstConf.queryThreshold)
+      val topicalTweetStream = querier(List(topic.query), noRetweetStream, TrecBurstConf.queryThreshold)
 
       // Create pairs of statuses and tokens in those statuses
       val tweetTokenPairs = topicalTweetStream
