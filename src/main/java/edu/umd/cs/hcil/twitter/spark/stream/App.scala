@@ -20,6 +20,8 @@ import edu.umd.cs.hcil.twitter.spark.common.Conf
 import edu.umd.cs.hcil.twitter.spark.common.ScoreGenerator
 import edu.umd.cs.hcil.twitter.spark.utils.StatusTokenizer
 
+import edu.umd.cs.hcil.twitter.streamer.KafkaTwitterStream
+
 import scala.collection.immutable.Queue
 import org.json4s._
 import org.json4s.jackson.JsonMethods._
@@ -115,21 +117,25 @@ object App {
     val replayOldStream = false
 
     // If we are going to use the direct twitter stream, use TwitterUtils. Else, use socket.
-    val twitterStream = (if ( replayOldStream == false ) {
-      TwitterUtils.createStream(ssc, None, filters)
-    } else {
-      val textStream = ssc.socketTextStream("localhost", 9999)
-      textStream.map(line => {
-        TwitterObjectFactory.createStatus(line)
-      })
-    }).repartition(numTasks)
+    val twitterStream = (
+      if ( replayOldStream == true ) {
+        val textStream = ssc.socketTextStream("localhost", 9999)
+        textStream.map(line => {
+          TwitterObjectFactory.createStatus(line)
+        })
+      } else if (TrecBurstConf.useKafka.equalsIgnoreCase("true") ) {
+        KafkaTwitterStream.getStream(ssc, TrecBurstConf)
+      } else {
+        TwitterUtils.createStream(ssc, None, filters)
+      }
+    ).repartition(numTasks)
 
     // Remove tweets not in English and other filters
     val noRetweetStream = twitterStream
       .filter(status => {
-        status != null &&
-        status.getLang != null &&
-        status.getLang.compareToIgnoreCase("en") == 0 &&
+        // status != null &&
+        // status.getLang != null &&
+        // status.getLang.compareToIgnoreCase("en") == 0 &&
         !status.getText.toLowerCase.contains("follow") &&
           getHashtagCount(status) <= broad_BurstConf.value.maxHashtags &&
           getUrlCount(status) <= broad_BurstConf.value.maxUrls

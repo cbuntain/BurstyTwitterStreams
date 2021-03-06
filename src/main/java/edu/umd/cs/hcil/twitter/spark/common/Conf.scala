@@ -45,6 +45,13 @@ class Conf(propsFilePath : String) extends Serializable {
 
   val retweetThreshold : Int = prop.getProperty("RETWEET_THRESHOLD", "100").toInt
 
+  val kafkaServer : String = prop.getProperty("KAFKA_SERVER", "localhost:9092")
+  val kafkaTopic : String = prop.getProperty("KAFKA_TOPIC", "burst")
+
+  val useKafka : String = prop.getProperty("USE_KAFKA", "false")
+
+  val debug : String = prop.getProperty("DEBUG", "false")
+
 //
 //  def MINOR_WINDOW_SIZE = 2
 //  def MAJOR_WINDOW_SIZE = 30 // Used 30 minutes here for TREC2015
