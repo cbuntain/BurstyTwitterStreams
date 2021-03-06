@@ -61,7 +61,8 @@ object App {
   val perTopicTaggedTweets : HashMap[String, List[App.TokenizedStatus]] = HashMap.empty
 
   // HTTP Client
-  @transient lazy val wsClient = NingWSClient()
+//  @transient lazy val wsClient = NingWSClient()
+    val wsClient = NingWSClient()
 
   // Create a thread pool for handling our analytics
 //  implicit val ec = ExecutionContext.fromExecutor(Executors.newFixedThreadPool(20))
@@ -346,14 +347,17 @@ object App {
     return scoredPairs
   }
 
-  def submitTweet(tweet : Status, topic : String, conf : Conf, wsClient : NingWSClient) : Unit = {
+  def submitTweet(tweet : Status, jaccardSim : Double, tweetBurstCount : Int, topic : String, conf : Conf, wsClient : NingWSClient) : Unit = {
 
     // POST /tweet/:topid/:tweetid/:clientid
     val submitUrl = "%s/tweet/%s/%s/%s".format(conf.brokerUrl, topic, tweet.getId.toString, conf.clientId)
 
+    println(s"***** Submitting via POST: ${submitUrl}")
+    val jsonString = """{"id":""" + tweet.getId.toString + """, "id_str":"""" + tweet.getId.toString + """", "jaccardSim": """ + s"${jaccardSim}, " + """"tweetBurstCount": """ + s"${tweetBurstCount}}"
+
     wsClient
       .url(submitUrl)
-      .execute("POST")
+      .post(jsonString)
       .map( { wsResponse =>
         println(s"Submitted: ${submitUrl}")
         println(s"Status: ${wsResponse.status}")
@@ -412,12 +416,14 @@ object App {
 
     // Get the tweets that appeared the most frequenly
     //  and order by their creation date
-    val topMatches: List[(Status, List[String])] = targetTweets
+    val topMatches: List[(Status, List[String], Int)] = targetTweets
       .filter(tuple => tuple._2 == maxCount)
-      .map(tuple => (tuple._1, tuple._3))
+      .map(tuple => (tuple._1, tuple._3, tuple._2))
       .sortBy(tuple => tuple._1.getCreatedAt)
       .collect()
       .toList
+
+    println(s"Match Count: ${topMatches.size}")
 
     // What tweets have we gotten for this topic before?
     var taggedTweets = perTopicTaggedTweets(topid)
@@ -425,11 +431,12 @@ object App {
 
     // Remove tweets that are similar to ones we've already pushed
     val similarityThreshold = TrecBurstConf.similarityThreshold
-    val leastSimilarTweets: List[(Double, TokenizedStatus)] = topMatches
+    val leastSimilarTweets: List[(Double, Int, TokenizedStatus)] = topMatches
       .filter(tuple => taggedTweetIds.contains(tuple._1.getId) == false)
       .map(tuple => {
         val tweet = tuple._1
         val tokens = tuple._2
+        val tweetBurstCount = tuple._3
 
         // Compute Jaccard similarity
         var jaccardSim = 0.0
@@ -448,24 +455,27 @@ object App {
         taggedTweets = taggedTweets :+ tokenizedStatus
         taggedTweetIds = taggedTweetIds :+ tweet.getId
 
-        (jaccardSim, tokenizedStatus)
+        (jaccardSim, tweetBurstCount, tokenizedStatus)
       })
       .filter(tuple => tuple._1 <= similarityThreshold)
       .sortBy(tuple => tuple._1)
       .take(TrecBurstConf.perMinuteMax)
 
-    val finalTweets = leastSimilarTweets.map(t => t._2)
+    println("**** Total Count: " + leastSimilarTweets.size)
+    val finalTweets = leastSimilarTweets.map(t => t._3)
     val pastTweets = perTopicTaggedTweets(topid)
     perTopicTaggedTweets(topid) = pastTweets ++ finalTweets
 
     // Match tweets to topics
     leastSimilarTweets.foreach(tuple => {
-      val tweet = tuple._2
+      val jaccardSim = tuple._1
+      val tweetBurstCount = tuple._2
+      val tweet = tuple._3
       val logEntry: String = createCsvString(topid, time, tweet.status.getId, tweet.status.getText)
 
       print(logEntry)
       outputFileWriter.write(logEntry)
-      submitTweet(tweet.status, topid, TrecBurstConf, wsClient)
+      submitTweet(tweet.status, jaccardSim, tweetBurstCount, topid, TrecBurstConf, wsClient)
     })
 
     outputFileWriter.close()
