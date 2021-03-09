@@ -49,6 +49,7 @@ class Conf(propsFilePath : String) extends Serializable {
   val kafkaTopic : String = prop.getProperty("KAFKA_TOPIC", "burst")
 
   val useKafka : String = prop.getProperty("USE_KAFKA", "false")
+  val useReplay : String = prop.getProperty("USE_REPLAY", "false")
 
   val debug : String = prop.getProperty("DEBUG", "false")
 

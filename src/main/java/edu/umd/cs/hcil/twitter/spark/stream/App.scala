@@ -111,14 +111,9 @@ object App {
       perTopicTaggedTweets(topic.topid) = List.empty
     }
 
-
-
-    // If true, we use a socket. If false, we use the direct Twitter stream
-    val replayOldStream = false
-
     // If we are going to use the direct twitter stream, use TwitterUtils. Else, use socket.
     val twitterStream = (
-      if ( replayOldStream == true ) {
+      if ( TrecBurstConf.useReplay.equalsIgnoreCase("true") ) {
         val textStream = ssc.socketTextStream("localhost", 9999)
         textStream.map(line => {
           TwitterObjectFactory.createStatus(line)
@@ -281,7 +276,8 @@ object App {
       tweetWindowStream.foreachRDD((rdd, time) => {
 
         // Use threading to avoid blocking on this topic
-        val tweetFinderStatus = future {
+        // val tweetFinderStatus = future {
+        val tweetFinderStatus = {
           val burstyTweetCount = findImportantTweets(topic.topid, rdd, time, outputFile)
           if ( burstyTweetCount > 0 ) {
             println(topic.topid + " - Bursty Tweet Count: " + burstyTweetCount + "\n")
@@ -406,6 +402,8 @@ object App {
     // If we have no bursty tokens or no tweets, skip
     val tweetCount = rdd.count()
     if ( tweetCount == 0 || targetTokens.size == 0 ) {
+      println("Empty RDD or no tokens...")
+      println("\tRDD Count: %d, Token Count: %d".format(tweetCount, targetTokens.size))
       return 0
     }
 
@@ -418,6 +416,12 @@ object App {
 
       (status, count, tokens)
     }).filter(t => t._2 > 0)
+
+    if ( targetTweets.isEmpty ) {
+      println("No status contains target tokens...")
+      return 0
+    }
+
     val maxCount = targetTweets.map(t => t._2).max()
 
     // Get the tweets that appeared the most frequenly
