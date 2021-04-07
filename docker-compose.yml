@@ -26,10 +26,6 @@ services:
       - ALLOW_PLAINTEXT_LISTENER=yes
     depends_on:
       - zookeeper
-  burstytwitterstreams:
-    build: .
-    networks:
-      - app-net
   spark:
     image: docker.io/bitnami/spark:3
     environment:
