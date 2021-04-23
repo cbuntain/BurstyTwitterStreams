@@ -27,3 +27,4 @@ project/plugins/project/
 
 # Python compiled files
 *.pyc
+*.bak

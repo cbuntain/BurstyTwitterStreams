@@ -64,4 +64,11 @@ services:
       - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
       - SPARK_SSL_ENABLED=no    
     networks:
-      - app-net    
+      - app-net  
+  bursty:
+    image: burstytwitterstreams:latest
+    working_dir: /app
+    entrypoint: spark-submit --master spark://spark:7077 --executor-memory 10g --conf spark.executor.memoryOverhead=16g --conf spark.driver.maxResultSize=16g --class edu.umd.cs.hcil.twitter.spark.stream.App target/BurstyTwitterStream-2.0-jar-with-dependencies.jar ./conf/streamer.properties ./conf/topics.json log_file.log ./conf/filter_keywords.txt
+    networks:
+      - app-net
+
