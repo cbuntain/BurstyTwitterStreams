@@ -13,12 +13,12 @@ import sys
 
 from requests.auth import HTTPBasicAuth
 
-elasticUrl = "http://ec2-3-235-243-150.compute-1.amazonaws.com:9200"
+elasticUrl = "http://aaa.bbb:9200"
 indexName = "tweets"
 dataType = "_doc"
 
-user = "elastic"
-passwd = "ElasticSearchFTW!"
+user = "xxx"
+passwd = "xxx"
 
 CONSUMER_KEY=None
 CONSUMER_SECRET=None
