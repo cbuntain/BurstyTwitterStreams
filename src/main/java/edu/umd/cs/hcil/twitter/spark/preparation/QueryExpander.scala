@@ -34,7 +34,7 @@ import scala.util.control.Breaks._
 object QueryExpander {
 
   implicit val formats = DefaultFormats // Brings in default date formats etc.
-  case class Topic(title: String, num: String, tokens: List[String])
+  case class Topic(query: String, topid: String, description: String, narrative: String)
 
 
 
@@ -77,7 +77,8 @@ object QueryExpander {
         case e : Exception => null
       }
     }).filter(status => status != null)
-//      .filter(status => status.getLang == "en")
+      .filter(status => status.getLang == "en")
+      .filter(status => status.isRetweet == false)
 
     val tweetTextTuples = tweets.map(status => {
       val tokens : List[String] = if ( burstConf.makeBigrams ) {
@@ -95,6 +96,7 @@ object QueryExpander {
         tokens.map(token => token.toLowerCase),
         status.getHashtagEntities.map(entity => entity.getText.toLowerCase))
     })
+    println("Tweet Count: %d".format(tweetTextTuples.count))
 
     val topicsJsonStr = scala.io.Source.fromFile(topicsFile).mkString
     val topicsJson = parse(topicsJsonStr)
@@ -102,7 +104,7 @@ object QueryExpander {
 
     println("Searching for:")
     for (topic <- topicList) {
-      println(topic.title)
+      println(topic.topid, topic.query)
     }
 
     tweetTextTuples.cache()
@@ -120,10 +122,10 @@ object QueryExpander {
 
     // Build the foregound model for each topic
     for ( topic <- topicList ) {
-      val strippedTitle = topic.title
+      val strippedTitle = topic.query
 
       // Pseudo-Relevance feedback
-      val scoredPairs = tweetTextTuples.mapPartitions(iter => {
+      val scoredPairs_ = tweetTextTuples.mapPartitions(iter => {
         // Construct an analyzer for our tweet text
         val analyzer = new StandardAnalyzer()
         val parser = new StandardQueryParser()
@@ -143,13 +145,27 @@ object QueryExpander {
 
           (id, text, tokens, hashtags, score)
         })
-      }).filter(tuple => tuple._5 > burstConf.queryExpansionMatchThreshold)
+      })
+      val scores_ = scoredPairs_.map(tuple => tuple._5).collect
+      println("Max: %f".format(scores_.max))
+      println("Mean: %f".format(scores_.reduce(_+_) / scores_.length))
+      
+      val scoredPairs = scoredPairs_.filter(tuple => tuple._5 > burstConf.queryExpansionMatchThreshold)
+
+      for ( tup <- scoredPairs.take(5) ) {
+        println(tup._2)
+      }
 
       val scoreList = scoredPairs.map(tuple => tuple._5).collect.sorted.reverse
       val topScoredPairs = if ( scoreList.length < burstConf.maxRelevantTweets ) {
+        println("Match List: %d".format(scoreList.length))
         scoredPairs
       } else {
         val minScore = scoreList(burstConf.maxRelevantTweets-1)
+
+        println("Match List is too big: %d".format(scoreList.length))
+        println("\tUpdated minimum score: %f".format(minScore))
+
         scoredPairs.filter(tuple => tuple._5 >= minScore)
       }
 
@@ -162,12 +178,12 @@ object QueryExpander {
 
       val matchCount = scoredPairs.count()
       if ( matchCount < burstConf.queryExpMinTweetCount ) {
-        println("Not enough tweets found for: " + topic.title + ", " + matchCount)
+        println("Not enough tweets found for: " + topic.topid + ", " + matchCount)
 
         // Add the original topic back in
         newTopicList = newTopicList :+ topic
       } else {
-        println("For topic [" + topic.title + "], tweet count: " + matchCount)
+        println("For topic [" + topic.topid + "], tweet count: " + matchCount)
 
         // Now build word2vec model from collected tweets, so we can extract synonyms
         val tokenizedTweets: RDD[(String, Int)] = topScoredPairs.flatMap(tuple => {
@@ -187,7 +203,7 @@ object QueryExpander {
           (token, gain)
         }).sortBy(tuple => tuple._2).reverse.take(burstConf.queryExpTokenTakeCount)
 
-        println("Top keywords for: " + topic.title)
+        println("Top keywords for: " + topic.topid)
         for ( pair <- topTokens ) {
           println("\t" + pair._1 + "->" + pair._2)
         }
@@ -198,18 +214,18 @@ object QueryExpander {
           .sortBy(tuple => tuple._2, false)
           .take(burstConf.queryExpHashtagTakeCount)
 
-        println("Top Hashtags for: " + topic.title)
+        println("Top Hashtags for: " + topic.topid)
         for ( pair <- topHashtags ) {
           println("\t" + pair._1 + "->" + pair._2)
         }
 
         // New set of tokens
-        val newTokenList : List[String] = topic.tokens ++
+        val newTokenList : Array[String] = //Array[String](topic.query) ++
           topTokens.map(tuple => tuple._1) ++
           topHashtags.map(tuple => '#' + tuple._1)
         .filter(token => !stopWords.contains(token))
 
-        val newTopic = Topic(topic.title, topic.num, newTokenList.distinct)
+        val newTopic = Topic(topic.query, topic.topid, newTokenList.distinct.mkString(" OR "), topic.narrative)
         newTopicList = newTopicList :+ newTopic
       }
     }
