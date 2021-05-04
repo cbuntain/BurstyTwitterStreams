@@ -60,8 +60,12 @@ To execute this streaming system, you need to submit this code via Spark's `spar
 ## Run in Docker (with docker-compose)
 
 ### Build Image 
-  update configuration in ./app/conf
-  from root of project build image:  `docker build -t burstytwitterstreams:latest ./app`
+  Update configuration in ./app/conf
+  From the root of project build image:
+  
+    docker build -t burstytwitterstreams:latest ./app
 
 ### Execute Stream Processing from Docker container
-   Spin up spark cluster with bursty container `docker-compose up -d && docker-compose logs`  
+   Spin up spark cluster with bursty container: 
+   
+    docker-compose up -d && docker-compose logs  
