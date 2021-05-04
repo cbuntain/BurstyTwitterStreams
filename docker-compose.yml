@@ -28,6 +28,7 @@ services:
       - zookeeper
   spark:
     image: docker.io/bitnami/spark:2.4.6
+    container_name: master
     environment:
       - SPARK_MODE=master
       - SPARK_RPC_AUTHENTICATION_ENABLED=no
@@ -41,6 +42,9 @@ services:
       - '7077:7077'
   spark-worker-1:
     image: docker.io/bitnami/spark:2.4.6
+    container_name: worker1
+    ports:
+      - '8082:8081'
     environment:
       - SPARK_MODE=worker
       - SPARK_MASTER_URL=spark://spark:7077
@@ -54,6 +58,9 @@ services:
       - app-net    
   spark-worker-2:
     image: docker.io/bitnami/spark:2.4.6
+    container_name: worker2
+    ports: 
+      - '8083:8081'
     environment:
       - SPARK_MODE=worker
       - SPARK_MASTER_URL=spark://spark:7077
@@ -72,3 +79,8 @@ services:
     networks:
       - app-net
 
+  submit_server:
+    build: ./app/src/main/python/httpServer
+    container_name: submit_server
+    networks:
+      - app-net

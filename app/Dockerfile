@@ -51,6 +51,6 @@ RUN curl -sL --retry 3 \
  && chown -R root:root $SPARK_HOME
 
 COPY . /app
-RUN cp /app/conf/* /app/
 RUN cd /app && mvn package
+RUN cp /app/conf/* /app/
 ENTRYPOINT /bin/bash
