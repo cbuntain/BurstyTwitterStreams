@@ -36,7 +36,7 @@ services:
       - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
       - SPARK_SSL_ENABLED=no
     networks:
-      - app-net    
+      - app-net
     ports:
       - '8081:8080'
       - '7077:7077'
@@ -53,13 +53,13 @@ services:
       - SPARK_RPC_AUTHENTICATION_ENABLED=no
       - SPARK_RPC_ENCRYPTION_ENABLED=no
       - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
-      - SPARK_SSL_ENABLED=no 
+      - SPARK_SSL_ENABLED=no
     networks:
-      - app-net    
+      - app-net
   spark-worker-2:
     image: docker.io/bitnami/spark:2.4.6
     container_name: worker2
-    ports: 
+    ports:
       - '8083:8081'
     environment:
       - SPARK_MODE=worker
@@ -69,9 +69,9 @@ services:
       - SPARK_RPC_AUTHENTICATION_ENABLED=no
       - SPARK_RPC_ENCRYPTION_ENABLED=no
       - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
-      - SPARK_SSL_ENABLED=no    
+      - SPARK_SSL_ENABLED=no
     networks:
-      - app-net  
+      - app-net
   bursty:
     image: burstytwitterstreams:latest
     working_dir: /app
@@ -80,7 +80,9 @@ services:
       - app-net
 
   submit_server:
-    build: ./app/src/main/python/httpServer
+    image: ./app/src/main/python/httpServer
+    env_file:
+       - ./app/src/main/python/httpServer/main.env
     container_name: submit_server
     networks:
       - app-net
