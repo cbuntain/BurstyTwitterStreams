@@ -10,20 +10,39 @@ import requests
 import json
 import tweepy
 import sys
+import argparse
 
 from requests.auth import HTTPBasicAuth
 
-elasticUrl = "http://ec2-3-235-243-150.compute-1.amazonaws.com:9200"
-indexName = "tweets"
+elasticUrl = "ps-740-08.ornl.gov:9202"
+indexName = "misinfo_bursty"
 dataType = "_doc"
 
-user = "elastic"
-passwd = "ElasticSearchFTW!"
+user = "user"
+passwd = "pass"
 
 CONSUMER_KEY=None
 CONSUMER_SECRET=None
 ACCESS_TOKEN=None
 ACCESS_TOKEN_SECRET=None
+
+
+def argparser():
+    """Parses CLI arguments
+    :returns: parser
+
+    """
+
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        description="Load server arguments")
+    parser.add_argument("--properties",
+                        help="Property Dict")
+    parser.add_argument("--port", help="Server Port", default=8080)
+    args = parser.parse_args()
+
+    return args
+
 
 def loadProperties(filepath, sep='=', comment_char='#'):
     """
@@ -41,9 +60,7 @@ def loadProperties(filepath, sep='=', comment_char='#'):
     return props
 
 
-
 def postData(tweet_json):
-
     tweet_meta = json.loads(tweet_json)
 
     # Skip tweets with no ID
@@ -81,21 +98,21 @@ def postData(tweet_json):
 
         # Build the URL
         tweetId = tweet["id_str"]
-        targetUrl = "{0}/{1}/{2}/{3}".\
+        targetUrl = "{0}/{1}/{2}/{3}". \
             format(elasticUrl, indexName, dataType, tweetId)
 
         logging.info("Posting to ES URL:" + targetUrl)
         r = requests.put(
-                targetUrl, 
-                data=tweet_json, 
-                headers={"Content-Type": "application/json"},
-                auth=HTTPBasicAuth(user, passwd)
-                )
+            targetUrl,
+            data=tweet_json,
+            headers={"Content-Type": "application/json"},
+            auth=HTTPBasicAuth(user, passwd)
+        )
         logging.info("Result: %d" % r.status_code)
 
     except Exception as e:
         logging.error("Error: " + str(e))
-        
+
 
 class S(BaseHTTPRequestHandler):
     def _set_response(self):
@@ -104,25 +121,30 @@ class S(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        logging.info("GET request,\nPath: %s\nHeaders:\n%s\n", str(self.path), str(self.headers))
+        logging.info("GET request,\nPath: %s\nHeaders:\n%s\n", str(self.path),
+                     str(self.headers))
         self._set_response()
         self.wfile.write("GET request for {}".format(self.path).encode('utf-8'))
 
     def do_POST(self):
-        content_length = int(self.headers['Content-Length']) # <--- Gets the size of data
-        post_data = self.rfile.read(content_length) # <--- Gets the data itself
+        content_length = int(
+            self.headers['Content-Length'])  # <--- Gets the size of data
+        post_data = self.rfile.read(content_length)  # <--- Gets the data itself
         logging.info("POST request,\nPath: %s\nHeaders:\n%s\n\nBody:\n%s\n",
-                str(self.path), str(self.headers), post_data.decode('utf-8'))
+                     str(self.path), str(self.headers),
+                     post_data.decode('utf-8'))
 
         self._set_response()
-        self.wfile.write("POST request for {}".format(self.path).encode('utf-8'))
+        self.wfile.write(
+            "POST request for {}".format(self.path).encode('utf-8'))
 
         posted_data = post_data.decode('utf-8')
         postData(posted_data)
 
+
 def run(server_class=HTTPServer, handler_class=S, port=8080):
     logging.basicConfig(level=logging.INFO)
-    server_address = ('', port)
+    server_address = ('', int(port))
     httpd = server_class(server_address, handler_class)
     logging.info('Starting httpd...\n')
     try:
@@ -132,19 +154,19 @@ def run(server_class=HTTPServer, handler_class=S, port=8080):
     httpd.server_close()
     logging.info('Stopping httpd...\n')
 
+
 if __name__ == '__main__':
-    from sys import argv
+    args = argparser()
+    if args.properties:
 
-    if len(argv) == 2:
-
-        propFile = sys.argv[1]
+        propFile = args.properties
         propDict = loadProperties(propFile)
 
-        CONSUMER_KEY=propDict["oauth.consumerKey"]
-        CONSUMER_SECRET=propDict["oauth.consumerSecret"]
-        ACCESS_TOKEN=propDict["oauth.accessToken"]
-        ACCESS_TOKEN_SECRET=propDict["oauth.accessTokenSecret"]
+        CONSUMER_KEY = propDict["oauth.consumerKey"]
+        CONSUMER_SECRET = propDict["oauth.consumerSecret"]
+        ACCESS_TOKEN = propDict["oauth.accessToken"]
+        ACCESS_TOKEN_SECRET = propDict["oauth.accessTokenSecret"]
 
-        run()
+        run(port=args.port)
     else:
-        run()
+        run(port=args.port)
