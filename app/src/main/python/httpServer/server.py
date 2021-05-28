@@ -12,11 +12,11 @@ import tweepy
 import os
 import argparse
 
-indexName = os.environ.get('ES_INDEX')
+indexName = "misinfo_bursty"
 dataType = "_doc"
 
 user = os.environ.get('ES_USER')
-passwd = os.environ.get('ES_PASSWOD')
+passwd = os.environ.get('ES_PASSWD')
 elasticUrl = os.environ.get('ES_HOST')
 port = os.environ.get('ES_PORT')
 CONSUMER_KEY= os.environ.get('CONSUMER_KEY')
@@ -79,6 +79,11 @@ def postData(tweet_json):
     auth = tweepy.OAuthHandler(CONSUMER_KEY, CONSUMER_SECRET)
     auth.set_access_token(ACCESS_TOKEN, ACCESS_TOKEN_SECRET)
     try:
+        logging.info(f'twitter CONSUMER_KEY: {CONSUMER_KEY} \n '
+                     f'CONSUMER_SECRET: {CONSUMER_SECRET} \n'
+                     f'ACCESS_TOKEN: {ACCESS_TOKEN} \n'
+                     f'ACCESS_TOKEN_SECRET: {ACCESS_TOKEN_SECRET}'
+                     )
         logging.info('Attempting to get twitter auth')
         redirect_url = auth.get_authorization_url()
     except tweepy.TweepError:
