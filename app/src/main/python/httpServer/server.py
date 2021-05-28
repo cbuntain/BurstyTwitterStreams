@@ -14,7 +14,7 @@ import argparse
 
 from requests.auth import HTTPBasicAuth
 
-elasticUrl = "ps-740-08.ornl.gov:9202"
+elasticUrl = "host:9202"
 indexName = "misinfo_bursty"
 dataType = "_doc"
 
