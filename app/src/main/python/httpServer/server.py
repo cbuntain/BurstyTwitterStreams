@@ -14,23 +14,23 @@ import argparse
 
 indexName = "misinfo_bursty"
 dataType = "_doc"
+logging.debug(os.environ)
+user = os.environ.get("ES_USER")
+passwd = os.environ.get("ES_PASSWD")
+elasticUrl = os.environ.get("ES_HOST")
+port = int(os.environ.get("ES_PORT"))
+CONSUMER_KEY = os.environ.get("CONSUMER_KEY")
+CONSUMER_SECRET = os.environ.get("CONSUMER_SECRET")
+ACCESS_TOKEN = os.environ.get("ACCESS_TOKEN")
+ACCESS_TOKEN_SECRET = os.environ.get("ACCESS_TOKEN_SECRET")
 
-user = os.environ.get('ES_USER')
-passwd = os.environ.get('ES_PASSWD')
-elasticUrl = os.environ.get('ES_HOST')
-port = os.environ.get('ES_PORT')
-CONSUMER_KEY= os.environ.get('CONSUMER_KEY')
-CONSUMER_SECRET=os.environ.get('CONSUMER_SECRET')
-ACCESS_TOKEN=os.environ.get('ACCESS_TOKEN')
-ACCESS_TOKEN_SECRET=os.environ.get('ACCESS_TOKEN_SECRET')
 
 ES = Elasticsearch(
-            host=elasticUrl,
-            http_auth=(user, passwd),
-            scheme='http',
-            port=port
-        )
-
+    host=elasticUrl,
+    http_auth=(user, passwd),
+    scheme='http',
+    port=port
+)
 
 
 def argparser():
@@ -124,7 +124,7 @@ def postData(tweet_json):
             format(elasticUrl, indexName, dataType, tweetId)
 
         logging.info(f"Posting to ES URL: {targetUrl} with tweet: {tweet_json} "
-                     f"and user: {user}, pwd: {passwd}"  )
+                     f"and user: {user}, pwd: {passwd}")
 
         res = ES.index(index=indexName, id=tweetId, body=tweet)
         logging.info("Result: %s" % res)
