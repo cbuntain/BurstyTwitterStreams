@@ -80,7 +80,7 @@ services:
       - app-net
 
   submit_server:
-    image: ./app/src/main/python/httpServer
+    image: ghcr.io/bryaneaton/burstytwitterstreams:latest
     env_file:
        - ./app/src/main/python/httpServer/main.env
     container_name: submit_server
