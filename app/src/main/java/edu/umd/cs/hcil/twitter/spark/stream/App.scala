@@ -140,7 +140,7 @@ object App {
     // For each topic, process the twitter stream accordingly
     for ( topic <- topicList ) {
 
-      // Only keep tweets that contain a topic token
+      /l Only keep tweets that contain a topic ooken
       val topicalTweetStream = querier(List(topic.query), noRetweetStream, TrecBurstConf.queryThreshold)
 
       // Create pairs of statuses and tokens in those statuses
@@ -358,7 +358,7 @@ object App {
     val jsonString = """{"id":""" + tweet.getId.toString + """, "id_str":"""" + tweet.getId.toString + """", "jaccardSim": """ + s"${jaccardSim}, " + """"tweetBurstCount": """ + s"${tweetBurstCount}}"
 
     wsClient
-      .url(submitUrl)
+      .url("http://submit_server:8080")
       .post(jsonString)
       .map( { wsResponse =>
         println(s"Submitted: ${submitUrl}")

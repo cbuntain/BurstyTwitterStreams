@@ -27,7 +27,7 @@ NOCACHED=""
 # functions {{{1
 banner() { # {{{2
   BANNER=""
-  BANNER="$BANNER\n  \033[32mHTTP Server\033[39m"
+  BANNER="$BANNER\n  \033[32mBursty\033[39m"
   echo -e "$BANNER\n\n"
 } # 2}}}
 die() { # {{{2
@@ -76,7 +76,7 @@ done
 echo $CR_PAT | docker login ghcr.io -u $CR_USER --password-stdin
 banner
 DOCKER_BUILDKIT=1 docker build $NOCACHED  \
-  -t "ghcr.io/bryaneaton/burstytwitterstreams/httpserver:$TAG" . || \
+  -t "ghcr.io/bryaneaton/burstytwitterstreams/bursty:$TAG" . || \
   die "Image failed to build."
-docker push "ghcr.io/bryaneaton/burstytwitterstreams/httpserver:$TAG"
+docker push "ghcr.io/bryaneaton/burstytwitterstreams/bursty:$TAG"
 # 1}}}

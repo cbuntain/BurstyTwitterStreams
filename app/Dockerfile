@@ -53,4 +53,5 @@ RUN curl -sL --retry 3 \
 COPY . /app
 RUN cd /app && mvn package
 RUN cp /app/conf/* /app/
+LABEL org.opencontainers.image.source https://github.com/bryaneaton/BurstyTwitterStreams
 ENTRYPOINT /bin/bash
