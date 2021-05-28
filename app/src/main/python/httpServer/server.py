@@ -6,25 +6,31 @@ Usage::
 """
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import logging
-import requests
+from elasticsearch import Elasticsearch
 import json
 import tweepy
-import sys
+import os
 import argparse
 
-from requests.auth import HTTPBasicAuth
-
-elasticUrl = "host:9202"
-indexName = "misinfo_bursty"
+indexName = os.environ.get('ES_INDEX')
 dataType = "_doc"
 
-user = "user"
-passwd = "pass"
+user = os.environ.get('ES_USER')
+passwd = os.environ.get('ES_PASSWOD')
+elasticUrl = os.environ.get('ES_HOST')
+port = os.environ.get('ES_PORT')
+CONSUMER_KEY= os.environ.get('CONSUMER_KEY')
+CONSUMER_SECRET=os.environ.get('CONSUMER_SECRET')
+ACCESS_TOKEN=os.environ.get('ACCESS_TOKEN')
+ACCESS_TOKEN_SECRET=os.environ.get('ACCESS_TOKEN_SECRET')
 
-CONSUMER_KEY=None
-CONSUMER_SECRET=None
-ACCESS_TOKEN=None
-ACCESS_TOKEN_SECRET=None
+ES = Elasticsearch(
+            host=elasticUrl,
+            http_auth=(user, passwd),
+            scheme='http',
+            port=port
+        )
+
 
 
 def argparser():
@@ -61,6 +67,8 @@ def loadProperties(filepath, sep='=', comment_char='#'):
 
 
 def postData(tweet_json):
+    # {"id": 759043035355312128, "id_str": "759043035355312128"}
+
     tweet_meta = json.loads(tweet_json)
 
     # Skip tweets with no ID
@@ -70,6 +78,11 @@ def postData(tweet_json):
     # Set up API
     auth = tweepy.OAuthHandler(CONSUMER_KEY, CONSUMER_SECRET)
     auth.set_access_token(ACCESS_TOKEN, ACCESS_TOKEN_SECRET)
+    try:
+        logging.info('Attempting to get twitter auth')
+        redirect_url = auth.get_authorization_url()
+    except tweepy.TweepError:
+        logging.error('Error! Failed to get request token.')
 
     try:
         api = tweepy.API(auth, wait_on_rate_limit=True)
@@ -78,7 +91,11 @@ def postData(tweet_json):
         status = api.get_status(tweet_meta["id"], tweet_mode="extended")
         tweet = status._json
 
+        logging.info(f'Found tweet: {tweet}')
+
         # Default values
+        logging.info('Setting default values')
+
         tweet["jaccardSim"] = 0.0
         tweet["tweetBurstCount"] = 0
         if "jaccardSim" in tweet:
@@ -101,14 +118,11 @@ def postData(tweet_json):
         targetUrl = "{0}/{1}/{2}/{3}". \
             format(elasticUrl, indexName, dataType, tweetId)
 
-        logging.info("Posting to ES URL:" + targetUrl)
-        r = requests.put(
-            targetUrl,
-            data=tweet_json,
-            headers={"Content-Type": "application/json"},
-            auth=HTTPBasicAuth(user, passwd)
-        )
-        logging.info("Result: %d" % r.status_code)
+        logging.info(f"Posting to ES URL: {targetUrl} with tweet: {tweet_json} "
+                     f"and user: {user}, pwd: {passwd}"  )
+
+        res = ES.index(index=indexName, id=tweetId, body=tweet)
+        logging.info("Result: %s" % res)
 
     except Exception as e:
         logging.error("Error: " + str(e))
@@ -139,6 +153,7 @@ class S(BaseHTTPRequestHandler):
             "POST request for {}".format(self.path).encode('utf-8'))
 
         posted_data = post_data.decode('utf-8')
+        logging.info(posted_data)
         postData(posted_data)
 
 
