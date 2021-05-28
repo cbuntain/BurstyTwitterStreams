@@ -18,7 +18,7 @@ logging.debug(os.environ)
 user = os.environ.get("ES_USER")
 passwd = os.environ.get("ES_PASSWD")
 elasticUrl = os.environ.get("ES_HOST")
-port = int(os.environ.get("ES_PORT"))
+es_port = int(os.environ.get("ES_PORT"))
 CONSUMER_KEY = os.environ.get("CONSUMER_KEY")
 CONSUMER_SECRET = os.environ.get("CONSUMER_SECRET")
 ACCESS_TOKEN = os.environ.get("ACCESS_TOKEN")
@@ -29,7 +29,7 @@ ES = Elasticsearch(
     host=elasticUrl,
     http_auth=(user, passwd),
     scheme='http',
-    port=port
+    port=es_port
 )
 
 

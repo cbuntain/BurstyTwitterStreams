@@ -29,7 +29,7 @@ RUN mkdir /home/myuser/code
 WORKDIR /home/myuser/code
 COPY . .
 
-EXPOSE 8585
+EXPOSE 8080
 
 # make sure all messages always reach console
 ENV PYTHONUNBUFFERED=1
@@ -40,4 +40,4 @@ ENV PATH="/home/myuser/venv/bin:$PATH"
 
 # /dev/shm is mapped to shared memory and should be used for gunicorn heartbeat
 # this will improve performance and avoid random freezes
-CMD ["python3", "server.py", "--port", "8585"]
+CMD ["python3", "server.py", "--port", "8080"]
