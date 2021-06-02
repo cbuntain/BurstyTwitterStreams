@@ -73,14 +73,14 @@ services:
     networks:
       - app-net
   bursty:
-    image: burstytwitterstreams:latest
+    image: ghcr.io/bryaneaton/burstytwitterstreams/bursty:latest
     working_dir: /app
     entrypoint: spark-submit --master spark://spark:7077 --executor-memory 10g --conf spark.executor.memoryOverhead=16g --conf spark.driver.maxResultSize=16g --class edu.umd.cs.hcil.twitter.spark.stream.App target/BurstyTwitterStream-2.0-jar-with-dependencies.jar ./conf/streamer.properties ./conf/topics.json log_file.log ./conf/filter_keywords.txt
     networks:
       - app-net
 
   submit_server:
-    image: ghcr.io/bryaneaton/burstytwitterstreams:latest
+    image: ghcr.io/bryaneaton/burstytwitterstreams/httpserver:latest
     env_file:
        - ./app/src/main/python/httpServer/main.env
     container_name: submit_server
