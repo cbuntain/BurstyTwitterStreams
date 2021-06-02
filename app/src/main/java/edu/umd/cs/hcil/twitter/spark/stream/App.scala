@@ -197,9 +197,10 @@ object App {
           val concrete = rdd.filter(tup => tup.nonEmpty).map(tup => tup.get)
           val tokenCount = concrete.count()
 
+          println("\t" + topid +  " - Number of tokens: %d".format(tokenCount))
+
           if (tokenCount > 0) {
 
-            println("\t" + topid +  " - Number of tokens: %d".format(tokenCount))
             val scores: RDD[(String, Double)] = ScoreGenerator.scoreUndatedList(TrecBurstConf.majorWindowSize, concrete)
 
             if (dateList.length >= TrecBurstConf.majorWindowSize) {
