@@ -86,7 +86,7 @@ object App {
     var numTasks = 16
 
     val checkpointPath = {
-      "./checkpointDirectory"
+      "/tmp/checkpointDirectory"
     }
     ssc.checkpoint(checkpointPath)
 
