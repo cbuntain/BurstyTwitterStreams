@@ -92,6 +92,7 @@ object App {
 
     val filters = scala.io.Source.fromFile(filtersFile).mkString.split("\n")
 
+    println(s"Filters: $filters")
     println(s"Properties Path: $propertiesPath")
 
     TrecBurstConf = new Conf(propertiesPath)
