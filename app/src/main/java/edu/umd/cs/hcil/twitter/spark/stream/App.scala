@@ -354,7 +354,7 @@ object App {
     // POST /tweet/:topid/:tweetid/:clientid
     val submitUrl = "%s/tweet/%s/%s/%s".format(conf.brokerUrl, topic, tweet.getId.toString, conf.clientId)
 
-    println(s"***** Submitting via POST: ${submitUrl}")
+    println(s"***** Submitting via POST: $submitUrl")
     val jsonString = """{"id":""" + tweet.getId.toString + """, "id_str":"""" + tweet.getId.toString + """", "jaccardSim": """ + s"${jaccardSim}, " + """"tweetBurstCount": """ + s"${tweetBurstCount}}"
 
     wsClient

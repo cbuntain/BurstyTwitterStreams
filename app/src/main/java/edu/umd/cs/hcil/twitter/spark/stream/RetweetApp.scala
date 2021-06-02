@@ -308,6 +308,7 @@ object RetweetApp {
 
     // POST /tweet/:topid/:tweetid/:clientid
     val submitUrl = "%s/tweet/%s/%s/%s".format(conf.brokerUrl, topic, tweet.getId.toString, conf.clientId)
+    println(s"***** Submitting via POST: $submitUrl")
 
     wsClient
       .url("http://submit_server:8080")
