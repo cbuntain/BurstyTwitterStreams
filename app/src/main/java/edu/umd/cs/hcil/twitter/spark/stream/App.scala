@@ -140,7 +140,7 @@ object App {
     // For each topic, process the twitter stream accordingly
     for ( topic <- topicList ) {
 
-      /l Only keep tweets that contain a topic ooken
+      // Only keep tweets that contain a topic ooken
       val topicalTweetStream = querier(List(topic.query), noRetweetStream, TrecBurstConf.queryThreshold)
 
       // Create pairs of statuses and tokens in those statuses
