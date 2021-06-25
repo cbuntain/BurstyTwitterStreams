@@ -28,6 +28,7 @@ services:
       - zookeeper
   spark:
     image: docker.io/bitnami/spark:2.4.6
+    user: root
     environment:
       - SPARK_MODE=master
       - SPARK_RPC_AUTHENTICATION_ENABLED=no
@@ -43,6 +44,7 @@ services:
       - '7077:7077'
   spark-worker:
     image: docker.io/bitnami/spark:2.4.6
+    user: root
     environment:
       - SPARK_MODE=worker
       - SPARK_MASTER_URL=spark://spark:7077
